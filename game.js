@@ -3,6 +3,7 @@ const ctx = canvas.getContext("2d");
 
 const HIDE = {
   interactionRange: 110,
+  transitionSeconds: 0.28,
 };
 
 const FOOTSTEP = {
@@ -13,13 +14,30 @@ const FOOTSTEP = {
   width: 7,
 };
 
-const hideActionButton = document.getElementById("hide-action");
+const LIGHT = {
+  direction: { x: -0.72, y: -0.38 },
+  shadowLength: 34,
+  ambient: 0.2,
+};
+
+const RUN = {
+  minDistance: 0.35,
+  blendIn: 9,
+  blendOut: 7,
+  phaseBase: 5.2,
+  phaseSpeedScale: 0.017,
+};
 
 let survivorIsHidden = false;
-let activeHidingSpot = null;
+let survivorHideBlend = 0;
 const survivorFootsteps = [];
 let footstepDistanceSinceLast = 0;
 let nextFootIsLeft = true;
+
+const runAnimation = {
+  survivor: { phase: 0, blend: 0, prevX: player.x, prevY: player.y, dirX: 0, dirY: 1 },
+  hunter: { phase: 0, blend: 0, prevX: hunter.x, prevY: hunter.y, dirX: 0, dirY: 1 },
+};
 
 const keys = new Set();
 let screen = { width: 0, height: 0 };
@@ -243,50 +261,59 @@ function autoOpenDoorFor(entity, range = 90) {
   }
 }
 
-function updateHideActionButton() {
-  const { spot, distance } = nearestHidingSpotFor(player);
-  const canInteract = survivorIsHidden || (spot && distance <= HIDE.interactionRange);
-
-  hideActionButton.hidden = !canInteract;
-  hideActionButton.textContent = survivorIsHidden ? "Out" : "Hide";
-  hideActionButton.setAttribute("aria-label", survivorIsHidden ? "Unhide from hiding place" : "Hide in nearby hiding place");
-}
-
-function positionHideActionButton(viewport) {
-  if (hideActionButton.hidden) {
-    return;
-  }
-
-  const cam = cameraFor(player, viewport);
-  const buttonRect = hideActionButton.getBoundingClientRect();
-  const margin = 12;
-
-  let x = viewport.x + (player.x - cam.x) + player.radius + 16;
-  let y = viewport.y + (player.y - cam.y) - buttonRect.height * 0.5;
-
-  x = clamp(x, viewport.x + margin, viewport.x + viewport.w - buttonRect.width - margin);
-  y = clamp(y, viewport.y + margin, viewport.y + viewport.h - buttonRect.height - margin);
-
-  hideActionButton.style.left = `${x}px`;
-  hideActionButton.style.top = `${y}px`;
-}
-
 function toggleHideState() {
   if (survivorIsHidden) {
     survivorIsHidden = false;
-    activeHidingSpot = null;
-    updateHideActionButton();
     return;
   }
 
   const { spot, distance } = nearestHidingSpotFor(player);
-  if (spot && distance <= HIDE.interactionRange) {
-    activeHidingSpot = spot;
-    player.x = spot.x + spot.w * 0.5;
-    player.y = spot.y + spot.h * 0.5;
-    survivorIsHidden = true;
-    updateHideActionButton();
+  if (!spot || distance > HIDE.interactionRange) {
+    return;
   }
+
+  player.x = spot.x + spot.w * 0.5;
+  player.y = spot.y + spot.h * 0.5;
+  survivorIsHidden = true;
+}
+
+function updateHideAnimation(deltaSeconds) {
+  const target = survivorIsHidden ? 1 : 0;
+  const speed = 1 / HIDE.transitionSeconds;
+
+  if (survivorHideBlend < target) {
+    survivorHideBlend = Math.min(target, survivorHideBlend + deltaSeconds * speed);
+  } else if (survivorHideBlend > target) {
+    survivorHideBlend = Math.max(target, survivorHideBlend - deltaSeconds * speed);
+  }
+}
+
+function updateEntityRunAnimation(entity, state, deltaSeconds) {
+  const movedDistance = Math.hypot(entity.x - state.prevX, entity.y - state.prevY);
+  const movedSpeed = deltaSeconds > 0 ? movedDistance / deltaSeconds : 0;
+  const isMoving = movedDistance > RUN.minDistance;
+
+  if (isMoving) {
+    const targetDirX = (entity.x - state.prevX) / movedDistance;
+    const targetDirY = (entity.y - state.prevY) / movedDistance;
+    const rotateLerp = clamp(deltaSeconds * 12, 0, 1);
+    state.dirX += (targetDirX - state.dirX) * rotateLerp;
+    state.dirY += (targetDirY - state.dirY) * rotateLerp;
+
+    const dirLength = Math.hypot(state.dirX, state.dirY) || 1;
+    state.dirX /= dirLength;
+    state.dirY /= dirLength;
+  }
+
+  if (isMoving) {
+    state.blend = clamp(state.blend + deltaSeconds * RUN.blendIn, 0, 1);
+  } else {
+    state.blend = clamp(state.blend - deltaSeconds * RUN.blendOut, 0, 1);
+  }
+
+  state.phase += (RUN.phaseBase + movedSpeed * RUN.phaseSpeedScale) * deltaSeconds * state.blend;
+  state.prevX = entity.x;
+  state.prevY = entity.y;
 }
 
 function moveSurvivor(deltaSeconds) {
@@ -444,6 +471,23 @@ function drawWorldGrid(cam, viewport) {
     ctx.fillRect(x, y, 2, 2);
   }
 
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.016)";
+  ctx.lineWidth = 1;
+  for (let y = 0; y <= WORLD.height; y += 120) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(WORLD.width, y);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+  for (let x = 0; x <= WORLD.width; x += 220) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x + WORLD.height * 0.08, WORLD.height);
+    ctx.stroke();
+  }
+
   ctx.restore();
 }
 
@@ -456,6 +500,26 @@ function drawGroundShadow(x, y, w, h, alpha = 0.28) {
   ctx.beginPath();
   ctx.ellipse(x + w * 0.5, y + h * 0.55, w * 0.5, h * 0.28, 0, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawProjectedShadowRect(x, y, w, h, height = 36, alpha = 0.2) {
+  const dx = -LIGHT.direction.x * LIGHT.shadowLength * (height / 36);
+  const dy = -LIGHT.direction.y * LIGHT.shadowLength * (height / 36);
+
+  ctx.save();
+  const shadow = ctx.createLinearGradient(x + w * 0.5, y + h, x + w * 0.5 + dx, y + h + dy);
+  shadow.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
+  shadow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = shadow;
+
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + w + dx, y + h + dy);
+  ctx.lineTo(x + dx, y + h + dy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawWithDepth(drawFn, shadowColor = "rgba(0, 0, 0, 0.28)", offsetX = 4, offsetY = 6, blur = 7) {
@@ -501,6 +565,18 @@ function drawMaterialRect(x, y, w, h, colors, options = {}) {
   if (options.gloss !== false) {
     ctx.fillStyle = options.gloss || "rgba(255, 255, 255, 0.08)";
     ctx.fillRect(x + 2, y + 2, Math.max(0, w - 4), Math.max(0, h * 0.16));
+
+    const directionalSpecular = ctx.createLinearGradient(
+      x,
+      y,
+      x + -LIGHT.direction.x * w,
+      y + -LIGHT.direction.y * h
+    );
+    directionalSpecular.addColorStop(0, "rgba(255, 255, 255, 0.16)");
+    directionalSpecular.addColorStop(0.45, "rgba(255, 255, 255, 0.05)");
+    directionalSpecular.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = directionalSpecular;
+    ctx.fillRect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2));
   }
 
   if (options.rim !== false) {
@@ -702,6 +778,98 @@ function drawRooms(cam) {
   ctx.restore();
 }
 
+function drawAmbientOcclusion(cam) {
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const room of rooms) {
+    const edgeFade = 32;
+
+    const top = ctx.createLinearGradient(room.x, room.y, room.x, room.y + edgeFade);
+    top.addColorStop(0, "rgba(0, 0, 0, 0.24)");
+    top.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = top;
+    ctx.fillRect(room.x, room.y, room.w, edgeFade);
+
+    const left = ctx.createLinearGradient(room.x, room.y, room.x + edgeFade, room.y);
+    left.addColorStop(0, "rgba(0, 0, 0, 0.18)");
+    left.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = left;
+    ctx.fillRect(room.x, room.y, edgeFade, room.h);
+
+    const corner = ctx.createRadialGradient(room.x + 22, room.y + 22, 0, room.x + 22, room.y + 22, 86);
+    corner.addColorStop(0, "rgba(0, 0, 0, 0.24)");
+    corner.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = corner;
+    ctx.fillRect(room.x, room.y, 90, 90);
+  }
+
+  ctx.restore();
+}
+
+function drawDecorationLightSources(cam, elapsedSeconds) {
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const decoration of roomDecorations) {
+    if (decoration.style === "lamp") {
+      const pulse = 0.92 + Math.sin(elapsedSeconds * 3.1 + decoration.x * 0.01) * 0.08;
+      const cx = decoration.x + decoration.w * 0.5;
+      const cy = decoration.y + decoration.h * 0.3;
+      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 210);
+      glow.addColorStop(0, `rgba(246, 210, 130, ${0.22 * pulse})`);
+      glow.addColorStop(0.55, `rgba(170, 120, 52, ${0.12 * pulse})`);
+      glow.addColorStop(1, "rgba(120, 60, 20, 0)");
+
+      ctx.fillStyle = glow;
+      ctx.fillRect(cx - 220, cy - 220, 440, 440);
+    }
+
+    if (decoration.style === "window") {
+      const beamX = decoration.x + decoration.w * 0.5;
+      const beamY = decoration.y + decoration.h;
+      const beamLength = Math.max(260, decoration.w * 2.4);
+      const beamWidth = Math.max(140, decoration.w * 1.4);
+
+      ctx.save();
+      ctx.translate(beamX, beamY);
+      ctx.rotate(0.2);
+
+      const beam = ctx.createLinearGradient(0, 0, beamLength, 0);
+      beam.addColorStop(0, "rgba(178, 214, 238, 0.12)");
+      beam.addColorStop(0.55, "rgba(120, 162, 190, 0.07)");
+      beam.addColorStop(1, "rgba(60, 90, 120, 0)");
+      ctx.fillStyle = beam;
+
+      ctx.beginPath();
+      ctx.moveTo(0, -beamWidth * 0.42);
+      ctx.lineTo(beamLength, -beamWidth * 0.12);
+      ctx.lineTo(beamLength, beamWidth * 0.12);
+      ctx.lineTo(0, beamWidth * 0.42);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawDepthHaze(cam) {
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  const haze = ctx.createLinearGradient(0, 0, 0, WORLD.height);
+  haze.addColorStop(0, "rgba(190, 210, 228, 0.02)");
+  haze.addColorStop(0.5, "rgba(120, 148, 172, 0.06)");
+  haze.addColorStop(1, "rgba(34, 42, 54, 0.14)");
+  ctx.fillStyle = haze;
+  ctx.fillRect(0, 0, WORLD.width, WORLD.height);
+
+  ctx.restore();
+}
+
 function drawHidingSpot(spot) {
   if (spot.style === "bed") {
     drawGroundShadow(spot.x, spot.y, spot.w, spot.h, 0.22);
@@ -894,50 +1062,175 @@ function drawHidingSpots(cam) {
   ctx.translate(-cam.x, -cam.y);
 
   for (const decoration of roomDecorations) {
+    const shadowHeight = clamp(decoration.h * 0.38, 18, 86);
+    drawProjectedShadowRect(decoration.x, decoration.y, decoration.w, decoration.h, shadowHeight, 0.17);
     drawWithDepth(() => drawDecoration(decoration), "rgba(0, 0, 0, 0.22)", 3, 4, 5);
   }
 
   for (const spot of hidingSpots) {
+    const shadowHeight = clamp(spot.h * 0.34, 16, 76);
+    drawProjectedShadowRect(spot.x, spot.y, spot.w, spot.h, shadowHeight, 0.16);
     drawWithDepth(() => drawHidingSpot(spot), "rgba(0, 0, 0, 0.24)", 4, 5, 6);
   }
 
   ctx.restore();
 }
 
-function drawCharacter(entity, cam) {
+function drawCharacter(entity, cam, runState) {
+  const isSurvivor = entity === player;
+  const hideBlend = isSurvivor ? survivorHideBlend : 0;
+  const runPhase = runState?.phase || 0;
+  const runBlend = runState?.blend || 0;
+  const facingX = runState?.dirX ?? 0;
+  const facingY = runState?.dirY ?? 1;
+
+  if (isSurvivor && hideBlend >= 0.995) {
+    return;
+  }
+
   const x = entity.x - cam.x;
-  const y = entity.y - cam.y;
-  const hidden = entity === player && survivorIsHidden;
-  const radius = hidden ? entity.radius * 0.84 : entity.radius;
+  const radius = isSurvivor ? entity.radius * (1 - hideBlend * 0.28) : entity.radius;
+  const cycleA = Math.sin(runPhase);
+  const cycleB = Math.sin(runPhase * 2 + 0.8);
+  const runBob = (cycleB * 0.5 + 0.5) * radius * 0.045 * runBlend;
+  const y = entity.y - cam.y - runBob;
+  const alpha = isSurvivor ? 1 - hideBlend * 0.95 : 1;
+  const facingAngle = Math.atan2(facingY, facingX) - Math.PI / 2;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const armSwing = (cycleA * 0.75 + cycleB * 0.25) * radius * 0.17 * runBlend;
+  const legSwing = (Math.sin(runPhase + Math.PI) * 0.78 + cycleB * 0.22) * radius * 0.21 * runBlend;
+  const torsoRoll = Math.sin(runPhase + Math.PI * 0.5) * 0.06 * runBlend;
+  const hipShift = cycleA * radius * 0.05 * runBlend;
+
+  const shadowOffsetX = -LIGHT.direction.x * LIGHT.shadowLength;
+  const shadowOffsetY = -LIGHT.direction.y * LIGHT.shadowLength;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.26)";
+  ctx.beginPath();
+  ctx.ellipse(x + shadowOffsetX, y + shadowOffsetY + radius * 0.32, radius * 0.95, radius * 0.45, Math.atan2(shadowOffsetY, shadowOffsetX), 0, Math.PI * 2);
+  ctx.fill();
 
   drawGroundShadow(x - radius, y + radius * 0.16, radius * 2, radius * 0.9, 0.24);
 
+  const torsoTop = isSurvivor ? "#6d86a5" : "#7d3535";
+  const torsoBottom = isSurvivor ? "#354f6b" : "#4c1515";
+  const limbColor = isSurvivor ? "#2b3a4d" : "#2f1010";
+  const skinColor = isSurvivor ? "#d5b89b" : "#c9a384";
+  const hairColor = isSurvivor ? "#54443a" : "#2a1a14";
+  const shoulderLight = isSurvivor ? "rgba(215, 233, 255, 0.26)" : "rgba(255, 204, 204, 0.18)";
+
   drawWithDepth(() => {
-    ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(facingAngle);
+    ctx.translate(hipShift, 0);
+    ctx.rotate(torsoRoll);
+
+    const bodyBaseY = -radius * 0.08;
+    const shoulderY = bodyBaseY - radius * 0.28;
+    const hipY = bodyBaseY + radius * 0.32;
+    const headY = -radius * 0.7;
+    const armReach = radius * 0.62;
+
+    ctx.strokeStyle = limbColor;
+    ctx.lineCap = "round";
+    ctx.lineWidth = radius * 0.22;
     ctx.beginPath();
-    ctx.arc(x + 4, y + 5, radius, 0, Math.PI * 2);
+    ctx.moveTo(-radius * 0.12, hipY);
+    ctx.lineTo(-radius * 0.22 + legSwing, radius * 0.78 - legSwing * 0.2);
+    ctx.moveTo(radius * 0.12, hipY);
+    ctx.lineTo(radius * 0.22 - legSwing, radius * 0.78 + legSwing * 0.2);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(20, 20, 22, 0.68)";
+    ctx.beginPath();
+    ctx.ellipse(-radius * 0.24, radius * 0.82, radius * 0.14, radius * 0.08, -0.15, 0, Math.PI * 2);
+    ctx.ellipse(radius * 0.24, radius * 0.82, radius * 0.14, radius * 0.08, 0.15, 0, Math.PI * 2);
     ctx.fill();
 
-    const bodyGradient = ctx.createRadialGradient(x - radius * 0.35, y - radius * 0.35, radius * 0.25, x, y, radius);
-    bodyGradient.addColorStop(0, "rgba(255, 255, 255, 0.42)");
-    bodyGradient.addColorStop(0.35, entity.color);
-    bodyGradient.addColorStop(1, "rgba(0, 0, 0, 0.28)");
-
-    ctx.fillStyle = bodyGradient;
+    const torsoGradient = ctx.createLinearGradient(0, shoulderY, 0, radius * 0.58);
+    torsoGradient.addColorStop(0, torsoTop);
+    torsoGradient.addColorStop(0.62, torsoBottom);
+    torsoGradient.addColorStop(1, "rgba(15, 18, 24, 0.9)");
+    ctx.fillStyle = torsoGradient;
     ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.ellipse(0, bodyBaseY, radius * 0.46, radius * 0.6, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.fillStyle = shoulderLight;
     ctx.beginPath();
-    ctx.arc(x - radius * 0.25, y - radius * 0.3, radius * 0.34, 0, Math.PI * 2);
+    ctx.ellipse(0, shoulderY + radius * 0.12, radius * 0.4, radius * 0.18, 0, 0, Math.PI * 2);
     ctx.fill();
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, shoulderY);
+    ctx.lineTo(0, radius * 0.5);
+    ctx.stroke();
+
+    ctx.strokeStyle = limbColor;
+    ctx.lineCap = "round";
+    ctx.lineWidth = radius * 0.2;
+    ctx.beginPath();
+    ctx.moveTo(-radius * 0.34, shoulderY + radius * 0.1);
+    ctx.lineTo(-armReach - armSwing, radius * 0.18 + armSwing * 0.28);
+    ctx.moveTo(radius * 0.34, shoulderY + radius * 0.1);
+    ctx.lineTo(armReach + armSwing, radius * 0.18 - armSwing * 0.28);
+    ctx.stroke();
+
+    ctx.fillStyle = skinColor;
+    ctx.beginPath();
+    ctx.arc(-armReach - armSwing, radius * 0.18 + armSwing * 0.28, radius * 0.1, 0, Math.PI * 2);
+    ctx.arc(armReach + armSwing, radius * 0.18 - armSwing * 0.28, radius * 0.1, 0, Math.PI * 2);
+    ctx.fill();
+
+    const headGradient = ctx.createRadialGradient(-radius * 0.12, headY - radius * 0.12, radius * 0.08, 0, headY, radius * 0.36);
+    headGradient.addColorStop(0, "rgba(255, 232, 212, 0.95)");
+    headGradient.addColorStop(1, skinColor);
+    ctx.fillStyle = headGradient;
+    ctx.beginPath();
+    ctx.arc(0, headY, radius * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = hairColor;
+    ctx.beginPath();
+    ctx.arc(0, headY - radius * 0.07, radius * 0.28, Math.PI * 1.06, Math.PI * 1.94);
+    ctx.lineTo(radius * 0.26, headY - radius * 0.04);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(30, 24, 22, 0.22)";
+    ctx.beginPath();
+    ctx.ellipse(0, headY + radius * 0.08, radius * 0.22, radius * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+    ctx.beginPath();
+    ctx.arc(-radius * 0.12, headY - radius * 0.18, radius * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.15)";
+    ctx.beginPath();
+    ctx.ellipse(-radius * 0.1, bodyBaseY - radius * 0.22, radius * 0.16, radius * 0.26, -0.15, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }, "rgba(0, 0, 0, 0.26)", 2, 4, 5);
 
-  ctx.fillStyle = "rgba(255, 255, 255, 0.10)";
-  ctx.beginPath();
-  ctx.arc(x - radius * 0.25, y - radius * 0.28, radius * 0.22, 0, Math.PI * 2);
-  ctx.fill();
+  if (isSurvivor && hideBlend > 0.06) {
+    const pulse = ctx.createRadialGradient(x, y, radius * 0.2, x, y, radius * (1.2 + hideBlend * 0.9));
+    pulse.addColorStop(0, `rgba(196, 224, 255, ${0.15 * (1 - hideBlend)})`);
+    pulse.addColorStop(1, "rgba(196, 224, 255, 0)");
+    ctx.fillStyle = pulse;
+    ctx.beginPath();
+    ctx.arc(x, y, radius * (1.2 + hideBlend * 0.9), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
 }
 
 function drawFog(elapsedSeconds) {
@@ -958,6 +1251,21 @@ function drawFog(elapsedSeconds) {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
+}
+
+function drawFilmGrain(viewport, elapsedSeconds) {
+  ctx.save();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = "#ffffff";
+
+  const jitter = Math.floor(elapsedSeconds * 60) % 97;
+  for (let i = 0; i < 180; i += 1) {
+    const x = viewport.x + ((i * 97 + jitter * 37) % viewport.w);
+    const y = viewport.y + ((i * 53 + jitter * 19) % viewport.h);
+    ctx.fillRect(x, y, 1, 1);
+  }
+
   ctx.restore();
 }
 
@@ -1019,6 +1327,7 @@ function drawCornerProximityGlow(viewport, intensity, cornerColor) {
 }
 
 function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds, threatIntensity = 0) {
+  void threatIntensity;
   const cam = cameraFor(focusEntity, viewport);
   const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
   const proximityIntensity = clamp(1 - distance / 1400, 0, 1);
@@ -1032,15 +1341,19 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   ctx.translate(viewport.x, viewport.y);
   drawWorldGrid(cam, viewport);
   drawRooms(cam);
+  drawAmbientOcclusion(cam);
   drawHidingSpots(cam);
+  drawDepthHaze(cam);
   drawFootsteps(cam, elapsedSeconds);
-  drawCharacter(hunter, cam);
-  drawCharacter(player, cam);
+  drawDecorationLightSources(cam, elapsedSeconds);
+  drawCharacter(hunter, cam, runAnimation.hunter);
+  drawCharacter(player, cam, runAnimation.survivor);
   drawFog(elapsedSeconds);
   drawVignette({ x: 0, y: 0, w: viewport.w, h: viewport.h });
   if (focusEntity !== hunter) {
     drawCornerProximityGlow({ x: 0, y: 0, w: viewport.w, h: viewport.h }, proximityIntensity, "198, 44, 44");
   }
+  drawFilmGrain({ x: 0, y: 0, w: viewport.w, h: viewport.h }, elapsedSeconds);
   ctx.restore();
 
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
@@ -1057,18 +1370,18 @@ function frame(now) {
   const elapsedSeconds = now / 1000;
   lastTime = now;
 
+  updateHideAnimation(deltaSeconds);
   updateFootsteps(elapsedSeconds);
   moveSurvivor(deltaSeconds);
   moveHunterWithKeys(deltaSeconds);
+  updateEntityRunAnimation(player, runAnimation.survivor, deltaSeconds);
+  updateEntityRunAnimation(hunter, runAnimation.hunter, deltaSeconds);
 
   const dividerWidth = 8;
   const leftWidth = Math.floor((screen.width - dividerWidth) / 2);
   const rightWidth = screen.width - leftWidth - dividerWidth;
   const leftViewport = { x: 0, y: 0, w: leftWidth, h: screen.height };
   const rightViewport = { x: leftWidth + dividerWidth, y: 0, w: rightWidth, h: screen.height };
-
-  updateHideActionButton();
-  positionHideActionButton(leftViewport);
 
   ctx.clearRect(0, 0, screen.width, screen.height);
   renderViewport(leftViewport, player, "Survivor", "rgba(195, 226, 255, 0.92)", elapsedSeconds);
@@ -1099,11 +1412,14 @@ window.addEventListener("keydown", (event) => {
   if (event.code === "KeyF") {
     interactDoor(player, false);
   }
+
+  if (event.code === "KeyQ") {
+    toggleHideState();
+  }
 });
 
 window.addEventListener("keyup", (event) => keys.delete(event.code));
 window.addEventListener("resize", resize);
-hideActionButton.addEventListener("click", toggleHideState);
 
 resize();
 requestAnimationFrame(frame);
