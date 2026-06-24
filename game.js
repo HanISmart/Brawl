@@ -5,10 +5,21 @@ const HIDE = {
   interactionRange: 110,
 };
 
+const FOOTSTEP = {
+  lifetime: 3,
+  spacing: 34,
+  sideOffset: 10,
+  length: 16,
+  width: 7,
+};
+
 const hideActionButton = document.getElementById("hide-action");
 
 let survivorIsHidden = false;
 let activeHidingSpot = null;
+const survivorFootsteps = [];
+let footstepDistanceSinceLast = 0;
+let nextFootIsLeft = true;
 
 const keys = new Set();
 let screen = { width: 0, height: 0 };
@@ -237,8 +248,27 @@ function updateHideActionButton() {
   const canInteract = survivorIsHidden || (spot && distance <= HIDE.interactionRange);
 
   hideActionButton.hidden = !canInteract;
-  hideActionButton.textContent = survivorIsHidden ? "Unhide" : "Hide";
+  hideActionButton.textContent = survivorIsHidden ? "Out" : "Hide";
   hideActionButton.setAttribute("aria-label", survivorIsHidden ? "Unhide from hiding place" : "Hide in nearby hiding place");
+}
+
+function positionHideActionButton(viewport) {
+  if (hideActionButton.hidden) {
+    return;
+  }
+
+  const cam = cameraFor(player, viewport);
+  const buttonRect = hideActionButton.getBoundingClientRect();
+  const margin = 12;
+
+  let x = viewport.x + (player.x - cam.x) + player.radius + 16;
+  let y = viewport.y + (player.y - cam.y) - buttonRect.height * 0.5;
+
+  x = clamp(x, viewport.x + margin, viewport.x + viewport.w - buttonRect.width - margin);
+  y = clamp(y, viewport.y + margin, viewport.y + viewport.h - buttonRect.height - margin);
+
+  hideActionButton.style.left = `${x}px`;
+  hideActionButton.style.top = `${y}px`;
 }
 
 function toggleHideState() {
@@ -273,10 +303,79 @@ function moveSurvivor(deltaSeconds) {
   if (keys.has("KeyD")) dx += 1;
 
   if (dx !== 0 || dy !== 0) {
+    const beforeX = player.x;
+    const beforeY = player.y;
     const length = Math.hypot(dx, dy) || 1;
     const distance = player.speed * deltaSeconds;
     moveEntity(player, (dx / length) * distance, (dy / length) * distance);
+
+    const movedX = player.x - beforeX;
+    const movedY = player.y - beforeY;
+    const movedDistance = Math.hypot(movedX, movedY);
+
+    if (movedDistance > 0.01) {
+      const directionX = movedX / movedDistance;
+      const directionY = movedY / movedDistance;
+      const perpendicularX = -directionY;
+      const perpendicularY = directionX;
+      const directionAngle = Math.atan2(directionY, directionX);
+
+      footstepDistanceSinceLast += movedDistance;
+
+      while (footstepDistanceSinceLast >= FOOTSTEP.spacing) {
+        footstepDistanceSinceLast -= FOOTSTEP.spacing;
+
+        const sideSign = nextFootIsLeft ? -1 : 1;
+        survivorFootsteps.push({
+          x: player.x + perpendicularX * FOOTSTEP.sideOffset * sideSign,
+          y: player.y + perpendicularY * FOOTSTEP.sideOffset * sideSign,
+          angle: directionAngle,
+          bornAt: performance.now() / 1000,
+        });
+
+        nextFootIsLeft = !nextFootIsLeft;
+      }
+    }
   }
+}
+
+function updateFootsteps(nowSeconds) {
+  while (survivorFootsteps.length > 0 && nowSeconds - survivorFootsteps[0].bornAt > FOOTSTEP.lifetime) {
+    survivorFootsteps.shift();
+  }
+}
+
+function drawFootsteps(cam, nowSeconds) {
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const step of survivorFootsteps) {
+    const age = nowSeconds - step.bornAt;
+    if (age < 0 || age > FOOTSTEP.lifetime) {
+      continue;
+    }
+
+    const life = 1 - age / FOOTSTEP.lifetime;
+    const alpha = life * 0.45;
+
+    ctx.save();
+    ctx.translate(step.x, step.y);
+    ctx.rotate(step.angle);
+
+    ctx.fillStyle = `rgba(28, 33, 40, ${alpha})`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, FOOTSTEP.length * 0.5, FOOTSTEP.width, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(220, 230, 244, ${alpha * 0.18})`;
+    ctx.beginPath();
+    ctx.ellipse(-2, -1, FOOTSTEP.length * 0.22, FOOTSTEP.width * 0.38, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  ctx.restore();
 }
 
 function moveHunter(deltaSeconds) {
@@ -895,8 +994,34 @@ function drawThreatOverlay(viewport, intensity) {
   ctx.fillRect(viewport.x, viewport.y, viewport.w, viewport.h);
 }
 
+function drawCornerProximityGlow(viewport, intensity, cornerColor) {
+  if (intensity <= 0) {
+    return;
+  }
+
+  const radius = Math.max(viewport.w, viewport.h) * (0.2 + intensity * 0.42);
+  const corners = [
+    { x: viewport.x, y: viewport.y },
+    { x: viewport.x + viewport.w, y: viewport.y },
+    { x: viewport.x, y: viewport.y + viewport.h },
+    { x: viewport.x + viewport.w, y: viewport.y + viewport.h },
+  ];
+
+  for (const corner of corners) {
+    const glow = ctx.createRadialGradient(corner.x, corner.y, 0, corner.x, corner.y, radius);
+    glow.addColorStop(0, `rgba(${cornerColor}, ${0.04 + intensity * 0.38})`);
+    glow.addColorStop(0.58, `rgba(${cornerColor}, ${0.03 + intensity * 0.22})`);
+    glow.addColorStop(1, `rgba(${cornerColor}, 0)`);
+
+    ctx.fillStyle = glow;
+    ctx.fillRect(viewport.x, viewport.y, viewport.w, viewport.h);
+  }
+}
+
 function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds, threatIntensity = 0) {
   const cam = cameraFor(focusEntity, viewport);
+  const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
+  const proximityIntensity = clamp(1 - distance / 1400, 0, 1);
 
   ctx.save();
   ctx.beginPath();
@@ -908,19 +1033,13 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   drawWorldGrid(cam, viewport);
   drawRooms(cam);
   drawHidingSpots(cam);
+  drawFootsteps(cam, elapsedSeconds);
   drawCharacter(hunter, cam);
   drawCharacter(player, cam);
   drawFog(elapsedSeconds);
   drawVignette({ x: 0, y: 0, w: viewport.w, h: viewport.h });
-  if (focusEntity === hunter) {
-    const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
-    const intensity = clamp(1 - distance / 1400, 0, 1);
-    drawThreatOverlay({ x: 0, y: 0, w: viewport.w, h: viewport.h }, intensity);
-  } else {
-    const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
-    const intensity = clamp(1 - distance / 1400, 0, 1);
-    ctx.fillStyle = `rgba(0, 0, 0, ${0.35 + intensity * 0.55})`;
-    ctx.fillRect(0, 0, viewport.w, viewport.h);
+  if (focusEntity !== hunter) {
+    drawCornerProximityGlow({ x: 0, y: 0, w: viewport.w, h: viewport.h }, proximityIntensity, "198, 44, 44");
   }
   ctx.restore();
 
@@ -938,7 +1057,7 @@ function frame(now) {
   const elapsedSeconds = now / 1000;
   lastTime = now;
 
-  updateHideActionButton();
+  updateFootsteps(elapsedSeconds);
   moveSurvivor(deltaSeconds);
   moveHunterWithKeys(deltaSeconds);
 
@@ -947,6 +1066,9 @@ function frame(now) {
   const rightWidth = screen.width - leftWidth - dividerWidth;
   const leftViewport = { x: 0, y: 0, w: leftWidth, h: screen.height };
   const rightViewport = { x: leftWidth + dividerWidth, y: 0, w: rightWidth, h: screen.height };
+
+  updateHideActionButton();
+  positionHideActionButton(leftViewport);
 
   ctx.clearRect(0, 0, screen.width, screen.height);
   renderViewport(leftViewport, player, "Survivor", "rgba(195, 226, 255, 0.92)", elapsedSeconds);

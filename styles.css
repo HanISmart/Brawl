@@ -66,17 +66,24 @@ body {
 
 .action-button {
   position: fixed;
-  right: 1rem;
-  bottom: 1rem;
-  padding: 0.85rem 1.1rem;
+  left: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
   border: 1px solid rgba(214, 206, 192, 0.18);
-  border-radius: 999px;
+  border-radius: 50%;
   background:
     linear-gradient(180deg, rgba(36, 42, 50, 0.9), rgba(18, 21, 26, 0.96)),
     radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.08), transparent 42%);
   color: var(--bone);
   font-family: "Cinzel", serif;
-  font-size: clamp(0.8rem, 1.5vw, 1rem);
+  font-size: 0.55rem;
+  line-height: 1;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   letter-spacing: 0.04em;
   box-shadow:
     0 14px 30px rgba(0, 0, 0, 0.42),
@@ -101,10 +108,5 @@ body {
     right: 0.65rem;
     top: 0.65rem;
     max-width: none;
-  }
-
-  .action-button {
-    right: 0.65rem;
-    bottom: 0.65rem;
   }
 }
