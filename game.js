@@ -24,19 +24,24 @@ const RUN = {
   minDistance: 0.35,
   blendIn: 9,
   blendOut: 7,
-  phaseBase: 5.2,
-  phaseSpeedScale: 0.017,
+  phaseBase: 5.6,
+  phaseSpeedScale: 0.021,
+};
+
+const KILL = {
+  extraRange: 10,
 };
 
 let survivorIsHidden = false;
 let survivorHideBlend = 0;
+let survivorIsDead = false;
 const survivorFootsteps = [];
 let footstepDistanceSinceLast = 0;
 let nextFootIsLeft = true;
 
 const runAnimation = {
-  survivor: { phase: 0, blend: 0, prevX: player.x, prevY: player.y, dirX: 0, dirY: 1 },
-  hunter: { phase: 0, blend: 0, prevX: hunter.x, prevY: hunter.y, dirX: 0, dirY: 1 },
+  survivor: { phase: 0, blend: 0, prevX: player.x, prevY: player.y, dirX: 0, dirY: 1, facingSign: 1 },
+  hunter: { phase: 0, blend: 0, prevX: hunter.x, prevY: hunter.y, dirX: 0, dirY: 1, facingSign: 1 },
 };
 
 const keys = new Set();
@@ -262,6 +267,10 @@ function autoOpenDoorFor(entity, range = 90) {
 }
 
 function toggleHideState() {
+  if (survivorIsDead) {
+    return;
+  }
+
   if (survivorIsHidden) {
     survivorIsHidden = false;
     return;
@@ -292,6 +301,7 @@ function updateEntityRunAnimation(entity, state, deltaSeconds) {
   const movedDistance = Math.hypot(entity.x - state.prevX, entity.y - state.prevY);
   const movedSpeed = deltaSeconds > 0 ? movedDistance / deltaSeconds : 0;
   const isMoving = movedDistance > RUN.minDistance;
+  const shouldAutoFace = entity !== player;
 
   if (isMoving) {
     const targetDirX = (entity.x - state.prevX) / movedDistance;
@@ -299,6 +309,10 @@ function updateEntityRunAnimation(entity, state, deltaSeconds) {
     const rotateLerp = clamp(deltaSeconds * 12, 0, 1);
     state.dirX += (targetDirX - state.dirX) * rotateLerp;
     state.dirY += (targetDirY - state.dirY) * rotateLerp;
+
+    if (shouldAutoFace && Math.abs(targetDirX) > 0.14) {
+      state.facingSign = targetDirX < 0 ? -1 : 1;
+    }
 
     const dirLength = Math.hypot(state.dirX, state.dirY) || 1;
     state.dirX /= dirLength;
@@ -317,7 +331,7 @@ function updateEntityRunAnimation(entity, state, deltaSeconds) {
 }
 
 function moveSurvivor(deltaSeconds) {
-  if (survivorIsHidden) {
+  if (survivorIsHidden || survivorIsDead) {
     return;
   }
 
@@ -328,6 +342,12 @@ function moveSurvivor(deltaSeconds) {
   if (keys.has("KeyS")) dy += 1;
   if (keys.has("KeyA")) dx -= 1;
   if (keys.has("KeyD")) dx += 1;
+
+  if (dx < 0) {
+    runAnimation.survivor.facingSign = 1;
+  } else if (dx > 0) {
+    runAnimation.survivor.facingSign = -1;
+  }
 
   if (dx !== 0 || dy !== 0) {
     const beforeX = player.x;
@@ -426,6 +446,23 @@ function moveHunterWithKeys(deltaSeconds) {
   const distance = hunter.speed * deltaSeconds;
   moveEntity(hunter, (dx / length) * distance, (dy / length) * distance);
   autoOpenDoorFor(hunter);
+  return true;
+}
+
+function tryHunterKill() {
+  if (survivorIsDead) {
+    return false;
+  }
+
+  const killRange = hunter.radius + player.radius + KILL.extraRange;
+  const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
+  if (distance > killRange) {
+    return false;
+  }
+
+  survivorIsDead = true;
+  survivorIsHidden = false;
+  survivorHideBlend = 0;
   return true;
 }
 
@@ -1081,8 +1118,7 @@ function drawCharacter(entity, cam, runState) {
   const hideBlend = isSurvivor ? survivorHideBlend : 0;
   const runPhase = runState?.phase || 0;
   const runBlend = runState?.blend || 0;
-  const facingX = runState?.dirX ?? 0;
-  const facingY = runState?.dirY ?? 1;
+  const facingSign = isSurvivor ? runState?.facingSign || 1 : 1;
 
   if (isSurvivor && hideBlend >= 0.995) {
     return;
@@ -1090,19 +1126,57 @@ function drawCharacter(entity, cam, runState) {
 
   const x = entity.x - cam.x;
   const radius = isSurvivor ? entity.radius * (1 - hideBlend * 0.28) : entity.radius;
-  const cycleA = Math.sin(runPhase);
-  const cycleB = Math.sin(runPhase * 2 + 0.8);
-  const runBob = (cycleB * 0.5 + 0.5) * radius * 0.045 * runBlend;
+  const stride = Math.sin(runPhase);
+  const cadence = Math.sin(runPhase * 2);
+  const runBob = (0.34 + Math.abs(cadence) * 0.66) * radius * 0.052 * runBlend;
   const y = entity.y - cam.y - runBob;
   const alpha = isSurvivor ? 1 - hideBlend * 0.95 : 1;
-  const facingAngle = Math.atan2(facingY, facingX) - Math.PI / 2;
+  const facingAngle = 0;
+
+  if (isSurvivor && survivorIsDead) {
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + radius * 0.44, radius * 0.92, radius * 0.33, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    ctx.translate(x, y + radius * 0.1);
+    ctx.rotate(0.18 * facingSign);
+    const bodyGradient = ctx.createLinearGradient(-radius * 0.62, 0, radius * 0.62, 0);
+    bodyGradient.addColorStop(0, "#8f5332");
+    bodyGradient.addColorStop(1, "#b56a44");
+    ctx.fillStyle = bodyGradient;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, radius * 0.7, radius * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#efc19c";
+    ctx.beginPath();
+    ctx.ellipse(radius * 0.68, -radius * 0.02, radius * 0.2, radius * 0.17, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#4b3527";
+    ctx.beginPath();
+    ctx.ellipse(radius * 0.73, -radius * 0.11, radius * 0.22, radius * 0.13, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+    return;
+  }
+
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  const armSwing = (cycleA * 0.75 + cycleB * 0.25) * radius * 0.17 * runBlend;
-  const legSwing = (Math.sin(runPhase + Math.PI) * 0.78 + cycleB * 0.22) * radius * 0.21 * runBlend;
-  const torsoRoll = Math.sin(runPhase + Math.PI * 0.5) * 0.06 * runBlend;
-  const hipShift = cycleA * radius * 0.05 * runBlend;
+  const leftArmStride = -stride;
+  const rightArmStride = stride;
+  const leftLegStride = stride;
+  const rightLegStride = -stride;
+  const leftLegLift = Math.max(0, -leftLegStride) * radius * 0.2 * runBlend;
+  const rightLegLift = Math.max(0, -rightLegStride) * radius * 0.2 * runBlend;
+  const torsoRoll = 0;
+  const hipShift = stride * radius * 0.028 * runBlend;
 
   const shadowOffsetX = -LIGHT.direction.x * LIGHT.shadowLength;
   const shadowOffsetY = -LIGHT.direction.y * LIGHT.shadowLength;
@@ -1114,108 +1188,259 @@ function drawCharacter(entity, cam, runState) {
 
   drawGroundShadow(x - radius, y + radius * 0.16, radius * 2, radius * 0.9, 0.24);
 
-  const torsoTop = isSurvivor ? "#6d86a5" : "#7d3535";
-  const torsoBottom = isSurvivor ? "#354f6b" : "#4c1515";
-  const limbColor = isSurvivor ? "#2b3a4d" : "#2f1010";
-  const skinColor = isSurvivor ? "#d5b89b" : "#c9a384";
-  const hairColor = isSurvivor ? "#54443a" : "#2a1a14";
-  const shoulderLight = isSurvivor ? "rgba(215, 233, 255, 0.26)" : "rgba(255, 204, 204, 0.18)";
+  const shirtTop = "#ce7d51";
+  const shirtBottom = "#a85f39";
+  const pantsTop = "#8a7a6a";
+  const pantsBottom = "#665a4e";
+  const sleeveColor = "#c06f45";
+  const skinColor = "#efc19c";
+  const hairColor = "#4b3527";
+  const shoeColor = "#6d4428";
 
   drawWithDepth(() => {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(facingAngle);
+    ctx.scale(facingSign, 1);
     ctx.translate(hipShift, 0);
     ctx.rotate(torsoRoll);
 
-    const bodyBaseY = -radius * 0.08;
-    const shoulderY = bodyBaseY - radius * 0.28;
-    const hipY = bodyBaseY + radius * 0.32;
-    const headY = -radius * 0.7;
-    const armReach = radius * 0.62;
+    const shoulderY = -radius * 0.42;
+    const torsoCenterY = -radius * 0.08;
+    const hipY = radius * 0.28;
+    const headY = -radius * 0.86;
+    const armTopY = shoulderY + radius * 0.08;
+    const armLength = radius * 0.52;
+    const armWidth = radius * 0.14;
+    const legTopY = hipY;
+    const legLength = radius * 0.56;
+    const legWidth = radius * 0.17;
 
-    ctx.strokeStyle = limbColor;
-    ctx.lineCap = "round";
-    ctx.lineWidth = radius * 0.22;
-    ctx.beginPath();
-    ctx.moveTo(-radius * 0.12, hipY);
-    ctx.lineTo(-radius * 0.22 + legSwing, radius * 0.78 - legSwing * 0.2);
-    ctx.moveTo(radius * 0.12, hipY);
-    ctx.lineTo(radius * 0.22 - legSwing, radius * 0.78 + legSwing * 0.2);
-    ctx.stroke();
+    const leftArmX = -radius * 0.4 + leftArmStride * radius * 0.17 * runBlend;
+    const rightArmX = radius * 0.4 + rightArmStride * radius * 0.17 * runBlend;
+    const leftArmY = armTopY + Math.max(0, leftArmStride) * radius * 0.08 * runBlend;
+    const rightArmY = armTopY + Math.max(0, rightArmStride) * radius * 0.08 * runBlend;
 
-    ctx.fillStyle = "rgba(20, 20, 22, 0.68)";
-    ctx.beginPath();
-    ctx.ellipse(-radius * 0.24, radius * 0.82, radius * 0.14, radius * 0.08, -0.15, 0, Math.PI * 2);
-    ctx.ellipse(radius * 0.24, radius * 0.82, radius * 0.14, radius * 0.08, 0.15, 0, Math.PI * 2);
-    ctx.fill();
+    const leftLegX = -radius * 0.2 + leftLegStride * radius * 0.28 * runBlend;
+    const rightLegX = radius * 0.2 + rightLegStride * radius * 0.28 * runBlend;
+    const leftLegY = legTopY - leftLegLift;
+    const rightLegY = legTopY - rightLegLift;
+    const leftLegLength = legLength - leftLegLift * 0.34;
+    const rightLegLength = legLength - rightLegLift * 0.34;
 
-    const torsoGradient = ctx.createLinearGradient(0, shoulderY, 0, radius * 0.58);
-    torsoGradient.addColorStop(0, torsoTop);
-    torsoGradient.addColorStop(0.62, torsoBottom);
-    torsoGradient.addColorStop(1, "rgba(15, 18, 24, 0.9)");
-    ctx.fillStyle = torsoGradient;
-    ctx.beginPath();
-    ctx.ellipse(0, bodyBaseY, radius * 0.46, radius * 0.6, 0, 0, Math.PI * 2);
-    ctx.fill();
+    if (!isSurvivor) {
+      const coatGradient = ctx.createLinearGradient(0, shoulderY - radius * 0.12, 0, hipY + radius * 0.56);
+      coatGradient.addColorStop(0, "#3a3c43");
+      coatGradient.addColorStop(0.45, "#2b2d33");
+      coatGradient.addColorStop(1, "#17191d");
+      ctx.fillStyle = coatGradient;
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.52, shoulderY - radius * 0.02);
+      ctx.lineTo(radius * 0.52, shoulderY - radius * 0.02);
+      ctx.lineTo(radius * 0.44, hipY + radius * 0.56);
+      ctx.lineTo(radius * 0.12, hipY + radius * 0.42);
+      ctx.lineTo(0, hipY + radius * 0.56);
+      ctx.lineTo(-radius * 0.12, hipY + radius * 0.42);
+      ctx.lineTo(-radius * 0.44, hipY + radius * 0.56);
+      ctx.closePath();
+      ctx.fill();
 
-    ctx.fillStyle = shoulderLight;
-    ctx.beginPath();
-    ctx.ellipse(0, shoulderY + radius * 0.12, radius * 0.4, radius * 0.18, 0, 0, Math.PI * 2);
-    ctx.fill();
+      const apronGradient = ctx.createLinearGradient(0, shoulderY - radius * 0.02, 0, hipY + radius * 0.48);
+      apronGradient.addColorStop(0, "#65735f");
+      apronGradient.addColorStop(1, "#3f4a3c");
+      ctx.fillStyle = apronGradient;
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.28, shoulderY + radius * 0.05);
+      ctx.lineTo(radius * 0.28, shoulderY + radius * 0.05);
+      ctx.lineTo(radius * 0.22, hipY + radius * 0.48);
+      ctx.lineTo(-radius * 0.22, hipY + radius * 0.48);
+      ctx.closePath();
+      ctx.fill();
 
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(0, shoulderY);
-    ctx.lineTo(0, radius * 0.5);
-    ctx.stroke();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.09)";
+      ctx.fillRect(-radius * 0.18, shoulderY + radius * 0.10, radius * 0.08, radius * 0.32);
 
-    ctx.strokeStyle = limbColor;
-    ctx.lineCap = "round";
-    ctx.lineWidth = radius * 0.2;
-    ctx.beginPath();
-    ctx.moveTo(-radius * 0.34, shoulderY + radius * 0.1);
-    ctx.lineTo(-armReach - armSwing, radius * 0.18 + armSwing * 0.28);
-    ctx.moveTo(radius * 0.34, shoulderY + radius * 0.1);
-    ctx.lineTo(armReach + armSwing, radius * 0.18 - armSwing * 0.28);
-    ctx.stroke();
+      ctx.fillStyle = "#212328";
+      ctx.fillRect(leftArmX - armWidth * 0.55, leftArmY - radius * 0.04, armWidth, armLength + radius * 0.08);
+      ctx.fillRect(rightArmX - armWidth * 0.55, rightArmY - radius * 0.04, armWidth, armLength + radius * 0.08);
 
-    ctx.fillStyle = skinColor;
-    ctx.beginPath();
-    ctx.arc(-armReach - armSwing, radius * 0.18 + armSwing * 0.28, radius * 0.1, 0, Math.PI * 2);
-    ctx.arc(armReach + armSwing, radius * 0.18 - armSwing * 0.28, radius * 0.1, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = "#1b1d22";
+      ctx.fillRect(leftLegX - legWidth * 0.52, leftLegY, legWidth, leftLegLength);
+      ctx.fillRect(rightLegX - legWidth * 0.52, rightLegY, legWidth, rightLegLength);
 
-    const headGradient = ctx.createRadialGradient(-radius * 0.12, headY - radius * 0.12, radius * 0.08, 0, headY, radius * 0.36);
-    headGradient.addColorStop(0, "rgba(255, 232, 212, 0.95)");
-    headGradient.addColorStop(1, skinColor);
-    ctx.fillStyle = headGradient;
-    ctx.beginPath();
-    ctx.arc(0, headY, radius * 0.34, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = "#2b2e35";
+      ctx.beginPath();
+      ctx.ellipse(leftLegX, leftLegY + leftLegLength + radius * 0.06, radius * 0.17, radius * 0.10, -0.08, 0, Math.PI * 2);
+      ctx.ellipse(rightLegX, rightLegY + rightLegLength + radius * 0.06, radius * 0.17, radius * 0.10, 0.08, 0, Math.PI * 2);
+      ctx.fill();
 
-    ctx.fillStyle = hairColor;
-    ctx.beginPath();
-    ctx.arc(0, headY - radius * 0.07, radius * 0.28, Math.PI * 1.06, Math.PI * 1.94);
-    ctx.lineTo(radius * 0.26, headY - radius * 0.04);
-    ctx.closePath();
-    ctx.fill();
+      ctx.fillStyle = "#252830";
+      ctx.beginPath();
+      ctx.ellipse(0, headY, radius * 0.34, radius * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
 
-    ctx.fillStyle = "rgba(30, 24, 22, 0.22)";
-    ctx.beginPath();
-    ctx.ellipse(0, headY + radius * 0.08, radius * 0.22, radius * 0.1, 0, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = "#4b3e2f";
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.56, headY - radius * 0.09);
+      ctx.lineTo(radius * 0.56, headY - radius * 0.09);
+      ctx.lineTo(radius * 0.42, headY + radius * 0.02);
+      ctx.lineTo(-radius * 0.42, headY + radius * 0.02);
+      ctx.closePath();
+      ctx.fill();
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
-    ctx.beginPath();
-    ctx.arc(-radius * 0.12, headY - radius * 0.18, radius * 0.08, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = "#5d4d3a";
+      ctx.beginPath();
+      ctx.ellipse(0, headY - radius * 0.2, radius * 0.33, radius * 0.16, 0, Math.PI, Math.PI * 2);
+      ctx.fill();
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.15)";
-    ctx.beginPath();
-    ctx.ellipse(-radius * 0.1, bodyBaseY - radius * 0.22, radius * 0.16, radius * 0.26, -0.15, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.fillStyle = "#ff2ecf";
+      ctx.beginPath();
+      ctx.arc(-radius * 0.12, headY - radius * 0.02, radius * 0.07, 0, Math.PI * 2);
+      ctx.arc(radius * 0.12, headY - radius * 0.02, radius * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(255, 120, 230, 0.38)";
+      ctx.beginPath();
+      ctx.arc(-radius * 0.12, headY - radius * 0.02, radius * 0.12, 0, Math.PI * 2);
+      ctx.arc(radius * 0.12, headY - radius * 0.02, radius * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "#4a3d2f";
+      ctx.lineWidth = radius * 0.08;
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.72, hipY + radius * 0.08);
+      ctx.lineTo(radius * 0.7, hipY + radius * 0.34);
+      ctx.stroke();
+    } else {
+      const backpackGradient = ctx.createLinearGradient(0, shoulderY - radius * 0.12, 0, hipY + radius * 0.46);
+      backpackGradient.addColorStop(0, "#9b8663");
+      backpackGradient.addColorStop(1, "#6f5f45");
+      ctx.fillStyle = backpackGradient;
+      ctx.beginPath();
+      ctx.ellipse(radius * 0.42, torsoCenterY + radius * 0.02, radius * 0.3, radius * 0.48, 0.08, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#798083";
+      ctx.beginPath();
+      ctx.ellipse(radius * 0.58, shoulderY - radius * 0.2, radius * 0.28, radius * 0.14, 0.1, 0, Math.PI * 2);
+      ctx.fill();
+
+      const shirtGradient = ctx.createLinearGradient(0, shoulderY, 0, hipY + radius * 0.12);
+      shirtGradient.addColorStop(0, shirtTop);
+      shirtGradient.addColorStop(1, shirtBottom);
+      ctx.fillStyle = shirtGradient;
+      ctx.beginPath();
+      ctx.ellipse(0, torsoCenterY, radius * 0.42, radius * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#d3c29f";
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.42, shoulderY + radius * 0.02);
+      ctx.lineTo(radius * 0.32, shoulderY - radius * 0.07);
+      ctx.lineTo(radius * 0.38, torsoCenterY + radius * 0.06);
+      ctx.lineTo(-radius * 0.34, torsoCenterY + radius * 0.19);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#856b4b";
+      ctx.fillRect(-radius * 0.22, torsoCenterY - radius * 0.04, radius * 0.44, radius * 0.08);
+
+      ctx.fillStyle = "#8f7958";
+      for (let i = -1; i <= 1; i += 1) {
+        ctx.fillRect(i * radius * 0.12 - radius * 0.03, torsoCenterY - radius * 0.035, radius * 0.06, radius * 0.06);
+      }
+
+      ctx.fillStyle = "#7f6949";
+      ctx.fillRect(-radius * 0.33, shoulderY + radius * 0.02, radius * 0.07, radius * 0.62);
+      ctx.fillRect(radius * 0.26, shoulderY + radius * 0.02, radius * 0.07, radius * 0.62);
+
+      ctx.fillStyle = sleeveColor;
+      ctx.fillRect(leftArmX - armWidth * 0.5, leftArmY, armWidth, armLength);
+      ctx.fillRect(rightArmX - armWidth * 0.5, rightArmY, armWidth, armLength);
+
+      ctx.fillStyle = skinColor;
+      ctx.beginPath();
+      ctx.arc(leftArmX, leftArmY + armLength, radius * 0.1, 0, Math.PI * 2);
+      ctx.arc(rightArmX, rightArmY + armLength, radius * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+
+      const pantsGradient = ctx.createLinearGradient(0, legTopY, 0, legTopY + legLength + radius * 0.16);
+      pantsGradient.addColorStop(0, pantsTop);
+      pantsGradient.addColorStop(1, pantsBottom);
+      ctx.fillStyle = pantsGradient;
+      ctx.fillRect(leftLegX - legWidth * 0.5, leftLegY, legWidth, leftLegLength);
+      ctx.fillRect(rightLegX - legWidth * 0.5, rightLegY, legWidth, rightLegLength);
+
+      ctx.fillStyle = "#8f8a7d";
+      ctx.fillRect(leftLegX - legWidth * 0.34, leftLegY + leftLegLength * 0.58, legWidth * 0.68, radius * 0.09);
+      ctx.fillRect(rightLegX - legWidth * 0.34, rightLegY + rightLegLength * 0.58, legWidth * 0.68, radius * 0.09);
+
+      ctx.fillStyle = shoeColor;
+      ctx.beginPath();
+      ctx.ellipse(leftLegX, leftLegY + leftLegLength + radius * 0.06, radius * 0.17, radius * 0.1, -0.08, 0, Math.PI * 2);
+      ctx.ellipse(rightLegX, rightLegY + rightLegLength + radius * 0.06, radius * 0.17, radius * 0.1, 0.08, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = skinColor;
+      ctx.fillRect(-radius * 0.1, -radius * 0.64, radius * 0.2, radius * 0.1);
+
+      const headGradient = ctx.createRadialGradient(-radius * 0.1, headY - radius * 0.1, radius * 0.06, 0, headY, radius * 0.34);
+      headGradient.addColorStop(0, "rgba(255, 228, 202, 0.95)");
+      headGradient.addColorStop(1, skinColor);
+      ctx.fillStyle = headGradient;
+      ctx.beginPath();
+      ctx.ellipse(0, headY, radius * 0.34, radius * 0.36, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = hairColor;
+      ctx.beginPath();
+      ctx.ellipse(0, headY - radius * 0.15, radius * 0.34, radius * 0.22, 0, Math.PI * 1.01, Math.PI * 1.99);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.28, headY - radius * 0.04);
+      ctx.lineTo(-radius * 0.34, headY + radius * 0.08);
+      ctx.lineTo(-radius * 0.2, headY + radius * 0.03);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(radius * 0.28, headY - radius * 0.04);
+      ctx.lineTo(radius * 0.34, headY + radius * 0.08);
+      ctx.lineTo(radius * 0.2, headY + radius * 0.03);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#c6ac84";
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.34, headY - radius * 0.2);
+      ctx.lineTo(radius * 0.34, headY - radius * 0.2);
+      ctx.lineTo(radius * 0.26, headY - radius * 0.03);
+      ctx.lineTo(-radius * 0.26, headY - radius * 0.03);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#6d5b45";
+      ctx.fillRect(-radius * 0.12, headY - radius * 0.17, radius * 0.24, radius * 0.06);
+
+      ctx.fillStyle = "#2a1b18";
+      ctx.beginPath();
+      ctx.arc(-radius * 0.11, headY - radius * 0.02, radius * 0.03, 0, Math.PI * 2);
+      ctx.arc(radius * 0.11, headY - radius * 0.02, radius * 0.03, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(120, 64, 52, 0.65)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(0, headY + radius * 0.1, radius * 0.08, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+      ctx.beginPath();
+      ctx.arc(-radius * 0.1, headY - radius * 0.2, radius * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     ctx.restore();
   }, "rgba(0, 0, 0, 0.26)", 2, 4, 5);
@@ -1395,6 +1620,16 @@ function frame(now) {
   ctx.fillRect(0, 0, screen.width, 1);
   ctx.fillRect(0, screen.height - 1, screen.width, 1);
 
+  if (survivorIsDead) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+    ctx.fillRect(0, screen.height * 0.42 - 32, screen.width, 58);
+    ctx.fillStyle = "rgba(255, 112, 112, 0.96)";
+    ctx.font = "700 34px Cinzel";
+    ctx.textAlign = "center";
+    ctx.fillText("SURVIVOR KILLED", screen.width * 0.5, screen.height * 0.42 + 8);
+    ctx.textAlign = "start";
+  }
+
   requestAnimationFrame(frame);
 }
 
@@ -1415,6 +1650,10 @@ window.addEventListener("keydown", (event) => {
 
   if (event.code === "KeyQ") {
     toggleHideState();
+  }
+
+  if (event.code === "Digit0" || event.code === "Numpad0") {
+    tryHunterKill();
   }
 });
 
