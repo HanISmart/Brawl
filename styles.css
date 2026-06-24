@@ -36,11 +36,15 @@ body {
   left: 1rem;
   padding: 0.85rem 1rem;
   max-width: min(90vw, 520px);
-  border: 1px solid rgba(214, 206, 192, 0.25);
-  border-radius: 6px;
-  background: linear-gradient(145deg, rgba(11, 13, 17, 0.75), rgba(14, 10, 10, 0.55));
-  backdrop-filter: blur(1.5px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(214, 206, 192, 0.16);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(24, 28, 34, 0.82), rgba(12, 14, 18, 0.72)),
+    radial-gradient(circle at 20% 18%, rgba(255, 255, 255, 0.06), transparent 45%);
+  backdrop-filter: blur(8px) saturate(0.9);
+  box-shadow:
+    0 18px 36px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .hud h1 {
@@ -49,14 +53,46 @@ body {
   font-size: clamp(1rem, 2.3vw, 1.55rem);
   letter-spacing: 0.03em;
   font-weight: 700;
-  color: #e7decc;
+  color: #f0e8db;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
 }
 
 .hud p {
   margin: 0.2rem 0;
   font-size: clamp(0.68rem, 1.45vw, 0.95rem);
   line-height: 1.35;
-  color: rgba(221, 212, 196, 0.85);
+  color: rgba(224, 216, 205, 0.82);
+}
+
+.action-button {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  padding: 0.85rem 1.1rem;
+  border: 1px solid rgba(214, 206, 192, 0.18);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(36, 42, 50, 0.9), rgba(18, 21, 26, 0.96)),
+    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.08), transparent 42%);
+  color: var(--bone);
+  font-family: "Cinzel", serif;
+  font-size: clamp(0.8rem, 1.5vw, 1rem);
+  letter-spacing: 0.04em;
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  z-index: 3;
+}
+
+.action-button:hover {
+  background:
+    linear-gradient(180deg, rgba(44, 50, 58, 0.96), rgba(25, 29, 36, 0.98)),
+    radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.1), transparent 42%);
+}
+
+.action-button:active {
+  transform: translateY(1px);
 }
 
 @media (max-width: 700px) {
@@ -65,5 +101,10 @@ body {
     right: 0.65rem;
     top: 0.65rem;
     max-width: none;
+  }
+
+  .action-button {
+    right: 0.65rem;
+    bottom: 0.65rem;
   }
 }
