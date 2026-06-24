@@ -949,8 +949,8 @@ function frame(now) {
   const rightViewport = { x: leftWidth + dividerWidth, y: 0, w: rightWidth, h: screen.height };
 
   ctx.clearRect(0, 0, screen.width, screen.height);
-  renderViewport(leftViewport, player, "Survivor", "rgba(195, 226, 255, 0.92)", elapsedSeconds);
-  renderViewport(rightViewport, hunter, "Hunter", "rgba(255, 178, 178, 0.92)", elapsedSeconds);
+  renderViewport(leftViewport, hunter, "Hunter", "rgba(255, 178, 178, 0.92)", elapsedSeconds);
+  renderViewport(rightViewport, player, "Survivor", "rgba(195, 226, 255, 0.92)", elapsedSeconds);
 
   ctx.fillStyle = "rgba(5, 7, 10, 0.94)";
   ctx.fillRect(leftWidth, 0, dividerWidth, screen.height);
