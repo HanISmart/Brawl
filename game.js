@@ -267,10 +267,10 @@ function moveSurvivor(deltaSeconds) {
   let dx = 0;
   let dy = 0;
 
-  if (keys.has("ArrowUp")) dy -= 1;
-  if (keys.has("ArrowDown")) dy += 1;
-  if (keys.has("ArrowLeft")) dx -= 1;
-  if (keys.has("ArrowRight")) dx += 1;
+  if (keys.has("w") || keys.has("W")) dy -= 1;
+  if (keys.has("s") || keys.has("S")) dy += 1;
+  if (keys.has("a") || keys.has("A")) dx -= 1;
+  if (keys.has("d") || keys.has("D")) dx += 1;
 
   if (dx !== 0 || dy !== 0) {
     const length = Math.hypot(dx, dy) || 1;
@@ -287,10 +287,10 @@ function moveHunterWithKeys(deltaSeconds) {
   let dx = 0;
   let dy = 0;
 
-  if (keys.has("w") || keys.has("W")) dy -= 1;
-  if (keys.has("s") || keys.has("S")) dy += 1;
-  if (keys.has("a") || keys.has("A")) dx -= 1;
-  if (keys.has("d") || keys.has("D")) dx += 1;
+  if (keys.has("ArrowUp")) dy -= 1;
+  if (keys.has("ArrowDown")) dy += 1;
+  if (keys.has("ArrowLeft")) dx -= 1;
+  if (keys.has("ArrowRight")) dx += 1;
 
   if (dx === 0 && dy === 0) {
     return false;
