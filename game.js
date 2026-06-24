@@ -267,10 +267,10 @@ function moveSurvivor(deltaSeconds) {
   let dx = 0;
   let dy = 0;
 
-  if (keys.has("w") || keys.has("W")) dy -= 1;
-  if (keys.has("s") || keys.has("S")) dy += 1;
-  if (keys.has("a") || keys.has("A")) dx -= 1;
-  if (keys.has("d") || keys.has("D")) dx += 1;
+  if (keys.has("KeyW")) dy -= 1;
+  if (keys.has("KeyS")) dy += 1;
+  if (keys.has("KeyA")) dx -= 1;
+  if (keys.has("KeyD")) dx += 1;
 
   if (dx !== 0 || dy !== 0) {
     const length = Math.hypot(dx, dy) || 1;
@@ -964,23 +964,22 @@ function frame(now) {
 }
 
 window.addEventListener("keydown", (event) => {
-  keys.add(event.key);
+  keys.add(event.code);
 
   if (event.repeat) {
     return;
   }
 
-  const key = event.key.toLowerCase();
-  if (key === "e") {
+  if (event.code === "KeyE") {
     interactDoor(player, true);
   }
 
-  if (key === "f") {
+  if (event.code === "KeyF") {
     interactDoor(player, false);
   }
 });
 
-window.addEventListener("keyup", (event) => keys.delete(event.key));
+window.addEventListener("keyup", (event) => keys.delete(event.code));
 window.addEventListener("resize", resize);
 hideActionButton.addEventListener("click", toggleHideState);
 
