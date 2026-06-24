@@ -1,5 +1,30 @@
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const startScreen = document.getElementById("start-screen");
+const stepName = document.getElementById("step-name");
+const stepMenu = document.getElementById("step-menu");
+const stepCreate = document.getElementById("step-create");
+const stepCreated = document.getElementById("step-created");
+const stepJoin = document.getElementById("step-join");
+const playerNameInput = document.getElementById("player-name");
+const createConfigSelect = document.getElementById("create-config");
+const joinCodeInput = document.getElementById("join-code");
+const createdRoomCode = document.getElementById("created-room-code");
+const lobbyGreeting = document.getElementById("lobby-greeting");
+const lobbyError = document.getElementById("lobby-error");
+const lobbyBackButton = document.getElementById("lobby-back");
+const openCreateButton = document.getElementById("open-create");
+const openJoinButton = document.getElementById("open-join");
+const startCreatedRoomButton = document.getElementById("start-created-room");
+const lobbySubtitle = document.getElementById("lobby-subtitle");
+const roomLobbyStatus = document.getElementById("room-lobby-status");
+const roomLobbySetup = document.getElementById("room-lobby-setup");
+const roomLobbyCapacity = document.getElementById("room-lobby-capacity");
+const roomPlayerList = document.getElementById("room-player-list");
+const hud = document.getElementById("hud");
+const hudTitle = document.getElementById("hud-title");
+const hudRoom = document.getElementById("hud-room");
+const hudControls = document.getElementById("hud-controls");
 
 const HIDE = {
   interactionRange: 110,
@@ -32,6 +57,19 @@ const KILL = {
   extraRange: 10,
 };
 
+const DEFAULT_PLAYER_NAME = "Survivor";
+const NET = {
+  sendRateSeconds: 0.05,
+  killRange: 60,
+  minMoveDelta: 0.2,
+};
+
+const ROOM_CONFIGS = {
+  h3s6: { label: "3 Hunter / 6 Survivor", hunters: 3, survivors: 6 },
+  h2s5: { label: "2 Hunter / 5 Survivor", hunters: 2, survivors: 5 },
+  h1s4: { label: "1 Hunter / 4 Survivor", hunters: 1, survivors: 4 },
+};
+
 let survivorIsHidden = false;
 let survivorHideBlend = 0;
 let survivorIsDead = false;
@@ -47,8 +85,416 @@ const runAnimation = {
 const keys = new Set();
 let screen = { width: 0, height: 0 };
 let lastTime = performance.now();
+let gameStarted = false;
+let survivorName = DEFAULT_PLAYER_NAME;
+let localPlayerRole = "survivor";
+let activeRoomCode = "";
+let activeRoomConfig = ROOM_CONFIGS.h1s4;
+let socket = null;
+let socketReady = false;
+let socketPlayerId = "";
+let roomPlayers = [];
+let primaryRivalId = "";
+let pendingRoomAction = null;
+let lastNetworkSendAt = 0;
+let lastSentState = null;
+let hasAppliedInitialSpawn = false;
+let matchWinner = null;
+let roomStarted = false;
+let roomOwnerId = "";
 
 const doors = buildDoors(rooms);
+
+function sanitizePlayerName(rawName) {
+  const cleaned = rawName.trim().slice(0, 24);
+  return cleaned || DEFAULT_PLAYER_NAME;
+}
+
+function sanitizeRoomCode(rawCode) {
+  return rawCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+}
+
+function sendSocketMessage(payload) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  socket.send(JSON.stringify(payload));
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function updateRoomLobbyUI(room = {}) {
+  if (!roomLobbyStatus || !roomPlayerList) {
+    return;
+  }
+
+  const hunterCount = Number(room.hunterCount || 0);
+  const survivorCount = Number(room.survivorCount || 0);
+  const needHunters = Number(activeRoomConfig.hunters || 0);
+  const needSurvivors = Number(activeRoomConfig.survivors || 0);
+  const isFull = Boolean(room.isFull);
+  const isOwner = Boolean(roomOwnerId && socketPlayerId && roomOwnerId === socketPlayerId);
+
+  if (roomStarted) {
+    roomLobbyStatus.textContent = "Match is starting...";
+  } else if (isFull) {
+    roomLobbyStatus.textContent = "Room is full. Auto-starting match...";
+  } else {
+    roomLobbyStatus.textContent = "Waiting for players...";
+  }
+
+  if (roomLobbySetup) {
+    roomLobbySetup.textContent = `Setup: ${activeRoomConfig.label}`;
+  }
+
+  if (roomLobbyCapacity) {
+    roomLobbyCapacity.textContent = `Hunters ${hunterCount}/${needHunters} | Survivors ${survivorCount}/${needSurvivors}`;
+  }
+
+  const rows = roomPlayers
+    .map((entry) => {
+      const roleLabel = entry.role === "hunter" ? "Hunter" : "Survivor";
+      const hostLabel = entry.id === roomOwnerId ? " (Host)" : "";
+      const selfLabel = entry.id === socketPlayerId ? " (You)" : "";
+      return `<div class="room-player-row"><span>${escapeHtml(entry.name)}${hostLabel}${selfLabel}</span><span class="room-role-badge">${roleLabel}</span></div>`;
+    })
+    .join("");
+
+  roomPlayerList.innerHTML = rows || '<div class="room-player-row"><span>No players yet</span><span class="room-role-badge">-</span></div>';
+
+  if (startCreatedRoomButton) {
+    const canShowStart = isOwner && !roomStarted;
+    startCreatedRoomButton.classList.toggle("is-hidden", !canShowStart);
+    startCreatedRoomButton.disabled = roomStarted;
+    startCreatedRoomButton.textContent = roomStarted ? "Starting..." : "Start Match";
+  }
+}
+
+function maybeStartWhenRoomReady() {
+  if (roomStarted && !gameStarted) {
+    startGame();
+  }
+}
+
+function applyRoomSnapshot(room) {
+  roomPlayers = Array.isArray(room?.players) ? room.players : [];
+  matchWinner = room?.winner === "hunter" ? "hunter" : null;
+  roomStarted = Boolean(room?.started);
+  roomOwnerId = String(room?.ownerId || "");
+
+  if (room?.code) {
+    activeRoomCode = room.code;
+  }
+
+  if (room?.configId && ROOM_CONFIGS[room.configId]) {
+    activeRoomConfig = ROOM_CONFIGS[room.configId];
+  }
+
+  const rivals = roomPlayers.filter((entry) => entry.id !== socketPlayerId && entry.role !== localPlayerRole);
+  primaryRivalId = rivals[0]?.id || "";
+
+  if (!gameStarted) {
+    applyInitialSpawnFromRoom();
+    updateRoomLobbyUI(room);
+    maybeStartWhenRoomReady();
+  }
+
+  if (hudRoom && gameStarted && activeRoomCode) {
+    hudRoom.textContent = `Room ${activeRoomCode} | Setup: ${activeRoomConfig.label} | Players: ${roomPlayers.length}`;
+  }
+}
+
+function applyInitialSpawnFromRoom() {
+  if (hasAppliedInitialSpawn || !socketPlayerId) {
+    return;
+  }
+
+  const self = roomPlayers.find((entry) => entry.id === socketPlayerId);
+  if (!self) {
+    return;
+  }
+
+  const localEntity = getLocalEntity();
+  localEntity.x = self.x;
+  localEntity.y = self.y;
+
+  if (localPlayerRole === "survivor") {
+    survivorIsHidden = Boolean(self.hidden);
+    survivorIsDead = Boolean(self.dead);
+    if (survivorIsDead) {
+      survivorHideBlend = 0;
+    }
+  }
+
+  hasAppliedInitialSpawn = true;
+}
+
+function handleSocketMessage(message) {
+  if (!message || typeof message.type !== "string") {
+    return;
+  }
+
+  if (message.type === "welcome") {
+    socketPlayerId = String(message.playerId || "");
+    return;
+  }
+
+  if (message.type === "roomJoined") {
+    if (message.selfId) {
+      socketPlayerId = String(message.selfId);
+    }
+
+    applyRoomSnapshot(message.room);
+
+    if (pendingRoomAction?.resolve) {
+      pendingRoomAction.resolve(message.room);
+      pendingRoomAction = null;
+    }
+    return;
+  }
+
+  if (message.type === "roomState") {
+    applyRoomSnapshot(message.room);
+    return;
+  }
+
+  if (message.type === "roomError") {
+    const errorMessage = String(message.message || "Room action failed.");
+    setLobbyError(errorMessage);
+    if (pendingRoomAction?.reject) {
+      pendingRoomAction.reject(new Error(errorMessage));
+      pendingRoomAction = null;
+    }
+  }
+}
+
+function ensureSocketConnection() {
+  if (socket && socketReady && socket.readyState === WebSocket.OPEN) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(`${protocol}://${window.location.host}`);
+
+    const failTimer = window.setTimeout(() => {
+      reject(new Error("Could not connect to game server."));
+    }, 8000);
+
+    socket.addEventListener("open", () => {
+      socketReady = true;
+      window.clearTimeout(failTimer);
+      resolve();
+    }, { once: true });
+
+    socket.addEventListener("error", () => {
+      socketReady = false;
+      window.clearTimeout(failTimer);
+      reject(new Error("WebSocket connection error."));
+    }, { once: true });
+
+    socket.addEventListener("close", () => {
+      socketReady = false;
+      if (gameStarted && hudRoom) {
+        hudRoom.textContent = `Room ${activeRoomCode || "-"} | Disconnected`;
+      }
+    });
+
+    socket.addEventListener("message", (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        handleSocketMessage(parsed);
+      } catch {
+        setLobbyError("Received invalid server data.");
+      }
+    });
+  });
+}
+
+function performRoomAction(payload) {
+  return new Promise((resolve, reject) => {
+    pendingRoomAction = { resolve, reject };
+    sendSocketMessage(payload);
+
+    window.setTimeout(() => {
+      if (!pendingRoomAction) {
+        return;
+      }
+
+      pendingRoomAction = null;
+      reject(new Error("Server timeout. Try again."));
+    }, 7000);
+  });
+}
+
+function setLobbyError(message = "") {
+  if (!lobbyError) {
+    return;
+  }
+
+  lobbyError.textContent = message;
+  lobbyError.classList.toggle("is-hidden", message.length === 0);
+}
+
+function showLobbyStep(stepId) {
+  const allSteps = [stepName, stepMenu, stepCreate, stepCreated, stepJoin];
+  for (const step of allSteps) {
+    if (!step) {
+      continue;
+    }
+
+    step.classList.toggle("is-hidden", step.id !== stepId);
+  }
+
+  if (lobbyBackButton) {
+    const canGoBack = stepId === "step-create" || stepId === "step-join";
+    lobbyBackButton.classList.toggle("is-hidden", !canGoBack);
+  }
+}
+
+function readSelectedRole(name) {
+  const checked = document.querySelector(`input[name="${name}"]:checked`);
+  return checked?.value === "hunter" ? "hunter" : "survivor";
+}
+
+function prepareLobbyMenu() {
+  if (lobbyGreeting) {
+    lobbyGreeting.textContent = `Welcome, ${survivorName}. Create a room or join a room with a code.`;
+  }
+
+  if (lobbySubtitle) {
+    lobbySubtitle.textContent = "Select how you want to play.";
+  }
+
+  setLobbyError("");
+  showLobbyStep("step-menu");
+}
+
+async function createRoomFromLobby() {
+  const configId = createConfigSelect?.value || "h1s4";
+  const role = readSelectedRole("createRole");
+
+  try {
+    await ensureSocketConnection();
+    localPlayerRole = role;
+    const room = await performRoomAction({
+      type: "createRoom",
+      configId,
+      role,
+      name: survivorName,
+    });
+
+    applyRoomSnapshot(room);
+  } catch (error) {
+    setLobbyError(error.message || "Could not create room.");
+    return;
+  }
+
+  localPlayerRole = role;
+
+  if (createdRoomCode) {
+    createdRoomCode.textContent = activeRoomCode || "------";
+  }
+
+  updateRoomLobbyUI({
+    hunterCount: roomPlayers.filter((entry) => entry.role === "hunter").length,
+    survivorCount: roomPlayers.filter((entry) => entry.role === "survivor").length,
+    isFull: false,
+  });
+
+  setLobbyError("");
+  showLobbyStep("step-created");
+  maybeStartWhenRoomReady();
+}
+
+async function joinRoomFromLobby() {
+  const requestedCode = sanitizeRoomCode(joinCodeInput?.value || "");
+  const role = readSelectedRole("joinRole");
+
+  if (!requestedCode) {
+    setLobbyError("Enter a valid room code first.");
+    return;
+  }
+
+  try {
+    await ensureSocketConnection();
+    localPlayerRole = role;
+    const room = await performRoomAction({
+      type: "joinRoom",
+      code: requestedCode,
+      role,
+      name: survivorName,
+    });
+    applyRoomSnapshot(room);
+  } catch (error) {
+    setLobbyError(error.message || "Could not join room.");
+    return;
+  }
+
+  if (createdRoomCode) {
+    createdRoomCode.textContent = activeRoomCode || requestedCode;
+  }
+
+  updateRoomLobbyUI({
+    hunterCount: roomPlayers.filter((entry) => entry.role === "hunter").length,
+    survivorCount: roomPlayers.filter((entry) => entry.role === "survivor").length,
+    isFull: false,
+  });
+
+  setLobbyError("");
+  showLobbyStep("step-created");
+  maybeStartWhenRoomReady();
+}
+
+function startGame() {
+  if (gameStarted) {
+    return;
+  }
+
+  if (activeRoomCode && !roomStarted) {
+    return;
+  }
+
+  if (!activeRoomCode) {
+    activeRoomCode = "LOCAL";
+  }
+
+  applyInitialSpawnFromRoom();
+
+  const roleTitle = localPlayerRole === "hunter" ? "Hunter" : "Survivor";
+  if (hudTitle) {
+    hudTitle.textContent = `Brawl: House of Shadows - ${survivorName} (${roleTitle})`;
+  }
+
+  if (hudRoom) {
+    hudRoom.textContent = `Room ${activeRoomCode} | Setup: ${activeRoomConfig.label} | Players: ${roomPlayers.length || 1}`;
+  }
+
+  if (hudControls) {
+    hudControls.textContent = localPlayerRole === "hunter"
+      ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range."
+      : "Survivor controls: WASD move. E open door. F close door. Q hide.";
+  }
+
+  if (hud) {
+    hud.classList.remove("is-hidden");
+  }
+
+  if (startScreen) {
+    startScreen.classList.add("is-hidden");
+  }
+
+  lastTime = performance.now();
+  gameStarted = true;
+}
 
 function resize() {
   screen.width = window.innerWidth;
@@ -331,6 +777,14 @@ function updateEntityRunAnimation(entity, state, deltaSeconds) {
 }
 
 function moveSurvivor(deltaSeconds) {
+  if (localPlayerRole !== "survivor") {
+    return;
+  }
+
+  if (matchWinner) {
+    return;
+  }
+
   if (survivorIsHidden || survivorIsDead) {
     return;
   }
@@ -430,6 +884,14 @@ function moveHunter(deltaSeconds) {
 }
 
 function moveHunterWithKeys(deltaSeconds) {
+  if (localPlayerRole !== "hunter") {
+    return false;
+  }
+
+  if (matchWinner) {
+    return false;
+  }
+
   let dx = 0;
   let dy = 0;
 
@@ -450,20 +912,201 @@ function moveHunterWithKeys(deltaSeconds) {
 }
 
 function tryHunterKill() {
-  if (survivorIsDead) {
+  const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
+  if (!rival || rival.role !== "survivor" || rival.dead) {
     return false;
   }
 
-  const killRange = hunter.radius + player.radius + KILL.extraRange;
-  const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
+  const killRange = NET.killRange;
+  const distance = Math.hypot(hunter.x - rival.x, hunter.y - rival.y);
   if (distance > killRange) {
     return false;
   }
 
-  survivorIsDead = true;
-  survivorIsHidden = false;
-  survivorHideBlend = 0;
+  sendSocketMessage({ type: "attemptKill", targetId: rival.id });
   return true;
+}
+
+function getLocalEntity() {
+  return localPlayerRole === "hunter" ? hunter : player;
+}
+
+function getRemotePlayers() {
+  return roomPlayers.filter((entry) => entry.id !== socketPlayerId);
+}
+
+function applyNetworkStateToWorld() {
+  const self = roomPlayers.find((entry) => entry.id === socketPlayerId);
+  if (self && localPlayerRole === "survivor") {
+    const wasDead = survivorIsDead;
+    survivorIsHidden = Boolean(self.hidden);
+    survivorIsDead = Boolean(self.dead);
+    if (!wasDead && survivorIsDead) {
+      survivorHideBlend = 0;
+    }
+  }
+
+  const rivals = getRemotePlayers().filter((entry) => entry.role !== localPlayerRole);
+  const primaryRival = rivals.find((entry) => entry.id === primaryRivalId) || rivals[0] || null;
+  primaryRivalId = primaryRival?.id || "";
+
+  if (!primaryRival) {
+    return;
+  }
+
+  if (localPlayerRole === "hunter") {
+    player.x = primaryRival.x;
+    player.y = primaryRival.y;
+    survivorIsHidden = Boolean(primaryRival.hidden);
+    survivorIsDead = Boolean(primaryRival.dead);
+    if (survivorIsDead) {
+      survivorHideBlend = 0;
+    }
+  } else {
+    hunter.x = primaryRival.x;
+    hunter.y = primaryRival.y;
+  }
+}
+
+function syncLocalPlayerToRoom(elapsedSeconds) {
+  if (!socketReady || !gameStarted) {
+    return;
+  }
+
+  if (matchWinner) {
+    return;
+  }
+
+  if (elapsedSeconds - lastNetworkSendAt < NET.sendRateSeconds) {
+    return;
+  }
+
+  const localEntity = getLocalEntity();
+  const nextState = {
+    x: localEntity.x,
+    y: localEntity.y,
+    hidden: localPlayerRole === "survivor" ? survivorIsHidden : false,
+    dead: localPlayerRole === "survivor" ? survivorIsDead : false,
+  };
+
+  if (lastSentState) {
+    const movedDistance = Math.hypot(nextState.x - lastSentState.x, nextState.y - lastSentState.y);
+    const changed = movedDistance >= NET.minMoveDelta
+      || nextState.hidden !== lastSentState.hidden
+      || nextState.dead !== lastSentState.dead;
+
+    if (!changed) {
+      return;
+    }
+  }
+
+  lastNetworkSendAt = elapsedSeconds;
+  lastSentState = { ...nextState };
+
+  sendSocketMessage({
+    type: "playerUpdate",
+    x: nextState.x,
+    y: nextState.y,
+    hidden: nextState.hidden,
+    dead: nextState.dead,
+  });
+}
+
+function drawRemotePlayers(cam) {
+  const remotePlayers = getRemotePlayers();
+  if (remotePlayers.length === 0) {
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const remote of remotePlayers) {
+    if (remote.id === primaryRivalId) {
+      continue;
+    }
+
+    const remoteEntity = {
+      x: remote.x,
+      y: remote.y,
+      radius: remote.role === "hunter" ? hunter.radius : player.radius,
+    };
+
+    drawCharacter(remoteEntity, cam, { phase: 0, blend: 0, facingSign: 1 }, {
+      role: remote.role,
+      hideBlend: remote.role === "survivor" && remote.hidden ? 1 : 0,
+      isDead: remote.role === "survivor" && remote.dead,
+    });
+  }
+
+  ctx.restore();
+}
+
+function drawCharacterNameTag(name, x, y, role) {
+  const isHunter = role === "hunter";
+  const radius = isHunter ? hunter.radius : player.radius;
+  const topGap = isHunter ? 13 : 11;
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.font = "12px Special Elite";
+
+  const label = String(name || (isHunter ? "Hunter" : "Survivor"));
+  const textWidth = ctx.measureText(label).width;
+  const tagX = x;
+  const tagY = y - radius - topGap;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+  ctx.fillRect(tagX - textWidth * 0.5 - 7, tagY - 11, textWidth + 14, 16);
+
+  ctx.fillStyle = isHunter ? "rgba(255, 196, 196, 0.95)" : "rgba(210, 232, 255, 0.95)";
+  ctx.fillText(label, tagX, tagY + 1);
+  ctx.restore();
+}
+
+function drawAllNameTags(cam) {
+  if (!gameStarted) {
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  if (!roomPlayers.length) {
+    drawCharacterNameTag(survivorName, getLocalEntity().x, getLocalEntity().y, localPlayerRole);
+    ctx.restore();
+    return;
+  }
+
+  const taggedIds = new Set();
+  for (const entry of roomPlayers) {
+    if (taggedIds.has(entry.id)) {
+      continue;
+    }
+
+    taggedIds.add(entry.id);
+
+    let x = entry.x;
+    let y = entry.y;
+
+    if (entry.id === socketPlayerId) {
+      const selfEntity = getLocalEntity();
+      x = selfEntity.x;
+      y = selfEntity.y;
+    } else if (entry.id === primaryRivalId) {
+      if (localPlayerRole === "hunter") {
+        x = player.x;
+        y = player.y;
+      } else {
+        x = hunter.x;
+        y = hunter.y;
+      }
+    }
+
+    drawCharacterNameTag(entry.name, x, y, entry.role);
+  }
+
+  ctx.restore();
 }
 
 function cameraFor(entity, viewport) {
@@ -1113,9 +1756,11 @@ function drawHidingSpots(cam) {
   ctx.restore();
 }
 
-function drawCharacter(entity, cam, runState) {
-  const isSurvivor = entity === player;
-  const hideBlend = isSurvivor ? survivorHideBlend : 0;
+function drawCharacter(entity, cam, runState, appearance = {}) {
+  const role = appearance.role || (entity === player ? "survivor" : "hunter");
+  const isSurvivor = role === "survivor";
+  const hideBlend = isSurvivor ? (appearance.hideBlend ?? survivorHideBlend) : 0;
+  const isDead = isSurvivor ? (appearance.isDead ?? survivorIsDead) : false;
   const runPhase = runState?.phase || 0;
   const runBlend = runState?.blend || 0;
   const facingSign = isSurvivor ? runState?.facingSign || 1 : 1;
@@ -1133,7 +1778,7 @@ function drawCharacter(entity, cam, runState) {
   const alpha = isSurvivor ? 1 - hideBlend * 0.95 : 1;
   const facingAngle = 0;
 
-  if (isSurvivor && survivorIsDead) {
+  if (isSurvivor && isDead) {
     ctx.save();
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
@@ -1571,8 +2216,10 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   drawDepthHaze(cam);
   drawFootsteps(cam, elapsedSeconds);
   drawDecorationLightSources(cam, elapsedSeconds);
+  drawRemotePlayers(cam);
   drawCharacter(hunter, cam, runAnimation.hunter);
   drawCharacter(player, cam, runAnimation.survivor);
+  drawAllNameTags(cam);
   drawFog(elapsedSeconds);
   drawVignette({ x: 0, y: 0, w: viewport.w, h: viewport.h });
   if (focusEntity !== hunter) {
@@ -1595,27 +2242,37 @@ function frame(now) {
   const elapsedSeconds = now / 1000;
   lastTime = now;
 
+  if (!gameStarted) {
+    ctx.clearRect(0, 0, screen.width, screen.height);
+    requestAnimationFrame(frame);
+    return;
+  }
+
+  applyNetworkStateToWorld();
+
   updateHideAnimation(deltaSeconds);
   updateFootsteps(elapsedSeconds);
-  moveSurvivor(deltaSeconds);
-  moveHunterWithKeys(deltaSeconds);
+  if (localPlayerRole === "hunter") {
+    moveHunterWithKeys(deltaSeconds);
+  } else {
+    moveSurvivor(deltaSeconds);
+  }
   updateEntityRunAnimation(player, runAnimation.survivor, deltaSeconds);
   updateEntityRunAnimation(hunter, runAnimation.hunter, deltaSeconds);
+  syncLocalPlayerToRoom(elapsedSeconds);
 
-  const dividerWidth = 8;
-  const leftWidth = Math.floor((screen.width - dividerWidth) / 2);
-  const rightWidth = screen.width - leftWidth - dividerWidth;
-  const leftViewport = { x: 0, y: 0, w: leftWidth, h: screen.height };
-  const rightViewport = { x: leftWidth + dividerWidth, y: 0, w: rightWidth, h: screen.height };
+  const viewport = { x: 0, y: 0, w: screen.width, h: screen.height };
+  const focusEntity = localPlayerRole === "hunter" ? hunter : player;
+  const viewportLabel = localPlayerRole === "hunter"
+    ? `${survivorName} - Hunter`
+    : `${survivorName} - Survivor`;
+  const labelColor = localPlayerRole === "hunter"
+    ? "rgba(255, 178, 178, 0.92)"
+    : "rgba(195, 226, 255, 0.92)";
 
   ctx.clearRect(0, 0, screen.width, screen.height);
-  renderViewport(leftViewport, player, "Survivor", "rgba(195, 226, 255, 0.92)", elapsedSeconds);
-  renderViewport(rightViewport, hunter, "Hunter", "rgba(255, 178, 178, 0.92)", elapsedSeconds);
+  renderViewport(viewport, focusEntity, viewportLabel, labelColor, elapsedSeconds);
 
-  ctx.fillStyle = "rgba(5, 7, 10, 0.94)";
-  ctx.fillRect(leftWidth, 0, dividerWidth, screen.height);
-  ctx.fillStyle = "rgba(255, 255, 255, 0.09)";
-  ctx.fillRect(leftWidth + 2, 0, 4, screen.height);
   ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
   ctx.fillRect(0, 0, screen.width, 1);
   ctx.fillRect(0, screen.height - 1, screen.width, 1);
@@ -1630,35 +2287,117 @@ function frame(now) {
     ctx.textAlign = "start";
   }
 
+  if (matchWinner === "hunter") {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
+    ctx.fillRect(0, screen.height * 0.32, screen.width, 84);
+    ctx.fillStyle = "rgba(255, 186, 186, 0.96)";
+    ctx.font = "700 40px Cinzel";
+    ctx.textAlign = "center";
+    ctx.fillText("HUNTERS WIN", screen.width * 0.5, screen.height * 0.32 + 54);
+    ctx.textAlign = "start";
+  }
+
   requestAnimationFrame(frame);
 }
 
 window.addEventListener("keydown", (event) => {
+  if (!gameStarted) {
+    return;
+  }
+
+  if (matchWinner) {
+    return;
+  }
+
   keys.add(event.code);
 
   if (event.repeat) {
     return;
   }
 
-  if (event.code === "KeyE") {
+  if (localPlayerRole === "survivor" && event.code === "KeyE") {
     interactDoor(player, true);
   }
 
-  if (event.code === "KeyF") {
+  if (localPlayerRole === "survivor" && event.code === "KeyF") {
     interactDoor(player, false);
   }
 
-  if (event.code === "KeyQ") {
+  if (localPlayerRole === "survivor" && event.code === "KeyQ") {
     toggleHideState();
   }
 
-  if (event.code === "Digit0" || event.code === "Numpad0") {
+  if (localPlayerRole === "hunter" && (event.code === "Digit0" || event.code === "Numpad0")) {
     tryHunterKill();
   }
 });
 
 window.addEventListener("keyup", (event) => keys.delete(event.code));
+window.addEventListener("blur", () => keys.clear());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    keys.clear();
+  }
+});
 window.addEventListener("resize", resize);
+
+if (stepName) {
+  stepName.addEventListener("submit", (event) => {
+    event.preventDefault();
+    survivorName = sanitizePlayerName(playerNameInput?.value || "");
+    prepareLobbyMenu();
+  });
+}
+
+if (openCreateButton) {
+  openCreateButton.addEventListener("click", () => {
+    setLobbyError("");
+    showLobbyStep("step-create");
+  });
+}
+
+if (openJoinButton) {
+  openJoinButton.addEventListener("click", () => {
+    setLobbyError("");
+    showLobbyStep("step-join");
+    if (joinCodeInput) {
+      joinCodeInput.focus();
+    }
+  });
+}
+
+if (stepCreate) {
+  stepCreate.addEventListener("submit", (event) => {
+    event.preventDefault();
+    createRoomFromLobby();
+  });
+}
+
+if (startCreatedRoomButton) {
+  startCreatedRoomButton.addEventListener("click", () => {
+    sendSocketMessage({ type: "startMatch" });
+  });
+}
+
+if (stepJoin) {
+  stepJoin.addEventListener("submit", (event) => {
+    event.preventDefault();
+    joinRoomFromLobby();
+  });
+}
+
+if (lobbyBackButton) {
+  lobbyBackButton.addEventListener("click", () => {
+    setLobbyError("");
+    showLobbyStep("step-menu");
+  });
+}
+
+if (playerNameInput) {
+  playerNameInput.focus();
+}
+
+showLobbyStep("step-name");
 
 resize();
 requestAnimationFrame(frame);

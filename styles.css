@@ -30,6 +30,202 @@ body {
   height: 100vh;
 }
 
+.start-screen {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 20;
+  padding: 1rem;
+  background:
+    radial-gradient(circle at 50% 15%, rgba(130, 34, 34, 0.24), transparent 45%),
+    linear-gradient(180deg, rgba(7, 9, 13, 0.78), rgba(3, 4, 7, 0.92));
+  backdrop-filter: blur(3px);
+}
+
+.start-card {
+  width: min(92vw, 460px);
+  padding: 1.1rem 1.2rem 1.2rem;
+  border-radius: 12px;
+  border: 1px solid rgba(214, 206, 192, 0.2);
+  background:
+    linear-gradient(180deg, rgba(24, 28, 34, 0.9), rgba(12, 14, 18, 0.84)),
+    radial-gradient(circle at 22% 18%, rgba(255, 255, 255, 0.06), transparent 44%);
+  box-shadow:
+    0 20px 45px rgba(0, 0, 0, 0.52),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.start-card h1 {
+  margin: 0;
+  font-family: "Cinzel", serif;
+  font-size: clamp(1.3rem, 4.6vw, 2rem);
+  color: #f0e8db;
+}
+
+.start-card p {
+  margin: 0.35rem 0 0.95rem;
+  color: rgba(224, 216, 205, 0.86);
+  font-size: clamp(0.86rem, 2.5vw, 1rem);
+}
+
+.start-card form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.lobby-step {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.start-card label {
+  font-size: 0.9rem;
+  color: rgba(233, 224, 213, 0.9);
+}
+
+.start-card input,
+.start-card select,
+.start-card button {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(214, 206, 192, 0.3);
+  font-family: "Special Elite", serif;
+  font-size: 1rem;
+}
+
+.start-card input {
+  padding: 0.7rem 0.75rem;
+  color: #f7efe2;
+  background: rgba(8, 10, 14, 0.9);
+}
+
+.start-card select {
+  padding: 0.7rem 0.75rem;
+  color: #f7efe2;
+  background: rgba(8, 10, 14, 0.9);
+}
+
+.start-card fieldset {
+  margin: 0.2rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid rgba(214, 206, 192, 0.25);
+  border-radius: 8px;
+}
+
+.start-card legend {
+  padding: 0 0.3rem;
+  color: rgba(233, 224, 213, 0.9);
+  font-size: 0.85rem;
+}
+
+.start-card fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
+}
+
+.start-card input[type="radio"] {
+  width: auto;
+}
+
+.start-card input:focus-visible,
+.start-card select:focus-visible,
+.start-card button:focus-visible {
+  outline: 2px solid rgba(209, 172, 128, 0.65);
+  outline-offset: 2px;
+}
+
+.start-card button {
+  margin-top: 0.35rem;
+  padding: 0.72rem 0.75rem;
+  color: #1d1411;
+  background: linear-gradient(180deg, #dec7a9, #cba87d);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.start-card button:hover {
+  filter: brightness(1.05);
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.lobby-greeting {
+  margin: 0 0 0.2rem;
+  color: rgba(236, 226, 214, 0.96);
+}
+
+.room-code {
+  padding: 0.7rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(214, 206, 192, 0.3);
+  color: #f6eacf;
+  background: rgba(10, 13, 18, 0.92);
+  text-align: center;
+  letter-spacing: 0.13em;
+  font-size: 1.1rem;
+}
+
+.room-capacity {
+  margin: 0.2rem 0 0;
+  font-size: 0.88rem;
+  color: rgba(220, 212, 201, 0.84);
+}
+
+.room-player-list {
+  margin-top: 0.2rem;
+  border: 1px solid rgba(214, 206, 192, 0.26);
+  border-radius: 8px;
+  background: rgba(8, 10, 14, 0.82);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.room-player-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.48rem 0.65rem;
+  border-bottom: 1px solid rgba(214, 206, 192, 0.12);
+  font-size: 0.9rem;
+  color: rgba(236, 226, 214, 0.94);
+}
+
+.room-player-row:last-child {
+  border-bottom: 0;
+}
+
+.room-role-badge {
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  border: 1px solid rgba(214, 206, 192, 0.24);
+  color: rgba(242, 234, 224, 0.95);
+  background: rgba(24, 30, 38, 0.76);
+}
+
+.lobby-error {
+  margin: 0.5rem 0 0;
+  color: #f2a8a8;
+  font-size: 0.9rem;
+}
+
+.back-button {
+  margin-top: 0.6rem;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
 .hud {
   position: fixed;
   top: 1rem;

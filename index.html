@@ -10,12 +10,75 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div class="start-screen" id="start-screen">
+    <div class="start-card">
+      <h1>Brawl: House of Shadows</h1>
+      <p id="lobby-subtitle">Enter your name before entering the house.</p>
+
+      <form class="lobby-step" id="step-name" autocomplete="off">
+        <label for="player-name">Your Name</label>
+        <input id="player-name" name="playerName" type="text" maxlength="24" placeholder="Survivor" required />
+        <button type="submit">Continue</button>
+      </form>
+
+      <div class="lobby-step is-hidden" id="step-menu">
+        <p class="lobby-greeting" id="lobby-greeting"></p>
+        <div class="button-row">
+          <button type="button" id="open-create">Create Room</button>
+          <button type="button" id="open-join">Join Room</button>
+        </div>
+      </div>
+
+      <form class="lobby-step is-hidden" id="step-create" autocomplete="off">
+        <label for="create-config">Room Setup</label>
+        <select id="create-config" name="createConfig" required>
+          <option value="h3s6">3 Hunter / 6 Survivor</option>
+          <option value="h2s5">2 Hunter / 5 Survivor</option>
+          <option value="h1s4">1 Hunter / 4 Survivor</option>
+        </select>
+
+        <fieldset>
+          <legend>Choose Your Role</legend>
+          <label><input type="radio" name="createRole" value="survivor" required checked /> Survivor</label>
+          <label><input type="radio" name="createRole" value="hunter" required /> Hunter</label>
+        </fieldset>
+
+        <button type="submit">Create And Show Code</button>
+      </form>
+
+      <div class="lobby-step is-hidden" id="step-created">
+        <p id="room-lobby-status">Room lobby</p>
+        <div class="room-code" id="created-room-code">------</div>
+        <p id="room-lobby-setup"></p>
+        <p class="room-capacity" id="room-lobby-capacity"></p>
+        <div class="room-player-list" id="room-player-list"></div>
+        <button type="button" id="start-created-room">Start Match</button>
+      </div>
+
+      <form class="lobby-step is-hidden" id="step-join" autocomplete="off">
+        <label for="join-code">Room Code</label>
+        <input id="join-code" name="joinCode" type="text" maxlength="8" placeholder="ABC123" required />
+
+        <fieldset>
+          <legend>Choose Your Role</legend>
+          <label><input type="radio" name="joinRole" value="survivor" required checked /> Survivor</label>
+          <label><input type="radio" name="joinRole" value="hunter" required /> Hunter</label>
+        </fieldset>
+
+        <button type="submit">Join Room</button>
+      </form>
+
+      <p class="lobby-error is-hidden" id="lobby-error" aria-live="polite"></p>
+      <button class="back-button is-hidden" type="button" id="lobby-back">Back</button>
+    </div>
+  </div>
+
   <canvas id="game"></canvas>
 
-  <div class="hud" aria-live="polite">
-    <h1>Brawl: House of Shadows</h1>
-    <p>Split screen: Survivor uses WASD. Hunter uses Arrow Keys.</p>
-    <p>E opens a nearby door. F closes a nearby door.</p>
+  <div class="hud is-hidden" id="hud" aria-live="polite">
+    <h1 id="hud-title">Brawl: House of Shadows</h1>
+    <p id="hud-room"></p>
+    <p id="hud-controls"></p>
     <p>Scale is stylized: 1 meter = 140 game units.</p>
   </div>
 
