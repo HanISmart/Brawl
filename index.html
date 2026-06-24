@@ -75,11 +75,22 @@
 
   <canvas id="game"></canvas>
 
+  <div class="proximity-warning is-hidden" id="proximity-warning">
+    <div class="proximity-icon">!</div>
+    <div class="proximity-text">NEARBY</div>
+  </div>
+
+  <div class="hide-indicator is-hidden" id="hide-indicator">
+    <div class="hide-icon">🚪</div>
+    <div class="hide-text">Press Q to Hide</div>
+  </div>
+
   <div class="hud is-hidden" id="hud" aria-live="polite">
     <h1 id="hud-title">Brawl: House of Shadows</h1>
     <p id="hud-room"></p>
     <p id="hud-controls"></p>
     <p>Scale is stylized: 1 meter = 140 game units.</p>
+    <button class="hud-back-button" id="hud-back-button" type="button">Back to Menu</button>
   </div>
 
   <script src="game-data.js"></script>

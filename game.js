@@ -25,6 +25,9 @@ const hud = document.getElementById("hud");
 const hudTitle = document.getElementById("hud-title");
 const hudRoom = document.getElementById("hud-room");
 const hudControls = document.getElementById("hud-controls");
+const hudBackButton = document.getElementById("hud-back-button");
+const proximityWarning = document.getElementById("proximity-warning");
+const hideIndicator = document.getElementById("hide-indicator");
 
 const HIDE = {
   interactionRange: 110,
@@ -102,6 +105,14 @@ let hasAppliedInitialSpawn = false;
 let matchWinner = null;
 let roomStarted = false;
 let roomOwnerId = "";
+
+let hunterSearchMessage = "";
+let hunterSearchMessageTime = 0;
+let hunterDetectionMessage = "";
+let hunterDetectionMessageTime = 0;
+let survivorHideMessage = "";
+let survivorHideMessageTime = 0;
+let killAnimations = []; // Array of { x, y, progress, duration }
 
 const doors = buildDoors(rooms);
 
@@ -378,6 +389,64 @@ function prepareLobbyMenu() {
   showLobbyStep("step-menu");
 }
 
+function returnToNameEntry() {
+  // Stop the game
+  gameStarted = false;
+  matchWinner = null;
+  roomStarted = false;
+
+  // Disconnect socket if connected
+  if (socket) {
+    socket.close();
+    socket = null;
+    socketReady = false;
+    socketPlayerId = "";
+  }
+
+  // Reset game state
+  survivorIsHidden = false;
+  survivorHideBlend = 0;
+  survivorIsDead = false;
+  survivorFootsteps.length = 0;
+  footstepDistanceSinceLast = 0;
+  nextFootIsLeft = true;
+  hunterSearchMessage = "";
+  hunterSearchMessageTime = 0;
+  hunterDetectionMessage = "";
+  hunterDetectionMessageTime = 0;
+  survivorHideMessage = "";
+  survivorHideMessageTime = 0;
+  killAnimations.length = 0;
+
+  // Reset room state
+  activeRoomCode = "";
+  activeRoomConfig = ROOM_CONFIGS.h1s4;
+  roomPlayers.length = 0;
+  primaryRivalId = "";
+  roomOwnerId = "";
+  hasAppliedInitialSpawn = false;
+
+  // Reset player positions
+  player.x = 540;
+  player.y = 440;
+  hunter.x = 4300;
+  hunter.y = 2550;
+
+  // Hide game UI and show start screen
+  if (hud) {
+    hud.classList.add("is-hidden");
+  }
+
+  if (startScreen) {
+    startScreen.classList.remove("is-hidden");
+  }
+
+  // Reset lobby UI
+  playerNameInput.value = "";
+  setLobbyError("");
+  showLobbyStep("step-name");
+}
+
 async function createRoomFromLobby() {
   const configId = createConfigSelect?.value || "h1s4";
   const role = readSelectedRole("createRole");
@@ -480,7 +549,7 @@ function startGame() {
 
   if (hudControls) {
     hudControls.textContent = localPlayerRole === "hunter"
-      ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range."
+      ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range. Press 1 to search nearby hiding spots."
       : "Survivor controls: WASD move. E open door. F close door. Q hide.";
   }
 
@@ -719,6 +788,8 @@ function toggleHideState() {
 
   if (survivorIsHidden) {
     survivorIsHidden = false;
+    survivorHideMessage = "You are now VISIBLE";
+    survivorHideMessageTime = 2; // 2 seconds
     return;
   }
 
@@ -730,6 +801,8 @@ function toggleHideState() {
   player.x = spot.x + spot.w * 0.5;
   player.y = spot.y + spot.h * 0.5;
   survivorIsHidden = true;
+  survivorHideMessage = "You are now HIDDEN";
+  survivorHideMessageTime = 2; // 2 seconds
 }
 
 function updateHideAnimation(deltaSeconds) {
@@ -925,6 +998,104 @@ function tryHunterKill() {
 
   sendSocketMessage({ type: "attemptKill", targetId: rival.id });
   return true;
+}
+
+function tryHunterSearchSpot(nowSeconds) {
+  if (localPlayerRole !== "hunter") {
+    return;
+  }
+
+  const { spot, distance } = nearestHidingSpotFor(hunter);
+  if (!spot || distance > HIDE.interactionRange) {
+    hunterSearchMessage = "No hiding spot nearby.";
+    hunterSearchMessageTime = nowSeconds + 2;
+    return;
+  }
+
+  const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
+  if (!rival || rival.role !== "survivor") {
+    hunterSearchMessage = "No survivor to hunt.";
+    hunterSearchMessageTime = nowSeconds + 2;
+    return;
+  }
+
+  // Check if survivor is hiding in this spot
+  const isInSpot = rival.x >= spot.x && rival.x <= spot.x + spot.w &&
+                   rival.y >= spot.y && rival.y <= spot.y + spot.h;
+
+  if (!isInSpot || !rival.hidden) {
+    hunterSearchMessage = "Nothing is in here.";
+    hunterSearchMessageTime = nowSeconds + 3;
+    return;
+  }
+
+  // Survivor is in the spot! Send kill attempt and trigger animation
+  sendSocketMessage({ type: "attemptKill", targetId: rival.id });
+  
+  // Add kill animation at the spot location
+  killAnimations.push({
+    x: rival.x,
+    y: rival.y,
+    progress: 0,
+    duration: 0.6,
+  });
+
+  // Show detection message
+  hunterDetectionMessage = `SURVIVOR FOUND! ${rival.name} has been caught!`;
+  hunterDetectionMessageTime = nowSeconds + 4;
+}
+
+function updateProximityWarning() {
+  if (!gameStarted) {
+    if (proximityWarning) {
+      proximityWarning.classList.add("is-hidden");
+    }
+    return;
+  }
+
+  const proximityThreshold = 40 * WORLD.unitPerMeter; // 40 meters in game units
+  let isNearby = false;
+  let warningText = "NEARBY";
+
+  if (localPlayerRole === "survivor") {
+    if (!survivorIsDead) {
+      const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
+      isNearby = distance < proximityThreshold;
+      warningText = "HUNTER NEAR";
+    }
+  } else if (localPlayerRole === "hunter") {
+    // Check if any survivor is nearby
+    const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
+    if (rival && rival.role === "survivor" && !rival.dead) {
+      const distance = Math.hypot(rival.x - hunter.x, rival.y - hunter.y);
+      isNearby = distance < proximityThreshold;
+      warningText = "SURVIVOR NEAR";
+    }
+  }
+
+  if (proximityWarning) {
+    proximityWarning.classList.toggle("is-hidden", !isNearby);
+    const textElement = proximityWarning.querySelector(".proximity-text");
+    if (textElement) {
+      textElement.textContent = warningText;
+    }
+  }
+}
+
+function updateHideIndicator() {
+  if (!gameStarted || localPlayerRole !== "survivor" || survivorIsDead || survivorIsHidden) {
+    if (hideIndicator) {
+      hideIndicator.classList.add("is-hidden");
+    }
+    return;
+  }
+
+  const { spot, distance } = nearestHidingSpotFor(player);
+  const canHide = spot && distance <= HIDE.interactionRange;
+
+  if (hideIndicator) {
+    hideIndicator.classList.toggle("is-hidden", !canHide);
+  }
 }
 
 function getLocalEntity() {
@@ -1756,6 +1927,52 @@ function drawHidingSpots(cam) {
   ctx.restore();
 }
 
+function drawHidingSpotHighlight(cam) {
+  if (localPlayerRole !== "survivor" || survivorIsDead || survivorIsHidden) {
+    return;
+  }
+
+  const { spot, distance } = nearestHidingSpotFor(player);
+  if (!spot || distance > HIDE.interactionRange) {
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  // Draw glowing aura around the hiding spot
+  const glowRadius = Math.max(spot.w, spot.h) * 0.6 + 15;
+  const glow = ctx.createRadialGradient(
+    spot.x + spot.w * 0.5,
+    spot.y + spot.h * 0.5,
+    Math.max(spot.w, spot.h) * 0.3,
+    spot.x + spot.w * 0.5,
+    spot.y + spot.h * 0.5,
+    glowRadius
+  );
+  glow.addColorStop(0, "rgba(100, 200, 255, 0.4)");
+  glow.addColorStop(0.6, "rgba(100, 200, 255, 0.1)");
+  glow.addColorStop(1, "rgba(100, 200, 255, 0)");
+
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(
+    spot.x + spot.w * 0.5,
+    spot.y + spot.h * 0.5,
+    glowRadius,
+    0,
+    Math.PI * 2
+  );
+  ctx.fill();
+
+  // Draw border highlight
+  ctx.strokeStyle = "rgba(150, 220, 255, 0.6)";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(spot.x - 3, spot.y - 3, spot.w + 6, spot.h + 6);
+
+  ctx.restore();
+}
+
 function drawCharacter(entity, cam, runState, appearance = {}) {
   const role = appearance.role || (entity === player ? "survivor" : "hunter");
   const isSurvivor = role === "survivor";
@@ -2139,6 +2356,46 @@ function drawFilmGrain(viewport, elapsedSeconds) {
   ctx.restore();
 }
 
+function drawKillAnimations(cam) {
+  if (killAnimations.length === 0) {
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const anim of killAnimations) {
+    const progress = Math.min(anim.progress, 1);
+    
+    // Red expanding burst
+    ctx.fillStyle = `rgba(200, 50, 50, ${(1 - progress) * 0.8})`;
+    ctx.beginPath();
+    ctx.arc(anim.x, anim.y, 20 + progress * 60, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Slash lines
+    ctx.strokeStyle = `rgba(220, 80, 80, ${(1 - progress) * 0.9})`;
+    ctx.lineWidth = 3 + progress * 2;
+    ctx.lineCap = "round";
+    
+    for (let i = 0; i < 4; i += 1) {
+      const angle = (Math.PI / 2) * i + progress * Math.PI;
+      const length = 30 + progress * 50;
+      const x1 = anim.x + Math.cos(angle) * 10;
+      const y1 = anim.y + Math.sin(angle) * 10;
+      const x2 = anim.x + Math.cos(angle) * (10 + length);
+      const y2 = anim.y + Math.sin(angle) * (10 + length);
+      
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
 function drawVignette(viewport) {
   const gradient = ctx.createRadialGradient(viewport.x + viewport.w / 2, viewport.y + viewport.h / 2, Math.min(viewport.w, viewport.h) * 0.2, viewport.x + viewport.w / 2, viewport.y + viewport.h / 2, Math.max(viewport.w, viewport.h) * 0.7);
   gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
@@ -2213,12 +2470,14 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   drawRooms(cam);
   drawAmbientOcclusion(cam);
   drawHidingSpots(cam);
+  drawHidingSpotHighlight(cam);
   drawDepthHaze(cam);
   drawFootsteps(cam, elapsedSeconds);
   drawDecorationLightSources(cam, elapsedSeconds);
   drawRemotePlayers(cam);
   drawCharacter(hunter, cam, runAnimation.hunter);
   drawCharacter(player, cam, runAnimation.survivor);
+  drawKillAnimations(cam);
   drawAllNameTags(cam);
   drawFog(elapsedSeconds);
   drawVignette({ x: 0, y: 0, w: viewport.w, h: viewport.h });
@@ -2233,6 +2492,66 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   ctx.fillStyle = labelColor;
   ctx.font = "18px Cinzel";
   ctx.fillText(label, viewport.x + 14, viewport.y + 19);
+
+  // Display hunter search message at bottom center
+  if (localPlayerRole === "hunter" && hunterSearchMessage) {
+    ctx.save();
+    ctx.font = "16px Special Elite";
+    ctx.textAlign = "center";
+    const textWidth = ctx.measureText(hunterSearchMessage).width;
+    const messageX = viewport.x + viewport.w * 0.5;
+    const messageY = viewport.y + viewport.h - 40;
+    
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(messageX - textWidth * 0.5 - 12, messageY - 16, textWidth + 24, 28);
+    
+    ctx.fillStyle = "rgba(255, 200, 100, 0.95)";
+    ctx.fillText(hunterSearchMessage, messageX, messageY);
+    ctx.restore();
+  }
+
+  // Display hunter detection message at center (larger and more prominent)
+  if (localPlayerRole === "hunter" && hunterDetectionMessage) {
+    ctx.save();
+    ctx.font = "bold 24px Cinzel";
+    ctx.textAlign = "center";
+    const textWidth = ctx.measureText(hunterDetectionMessage).width;
+    const messageX = viewport.x + viewport.w * 0.5;
+    const messageY = viewport.y + viewport.h * 0.5;
+    
+    // Red background for kill/detection message
+    ctx.fillStyle = "rgba(200, 0, 0, 0.8)";
+    ctx.fillRect(messageX - textWidth * 0.5 - 16, messageY - 20, textWidth + 32, 40);
+    
+    // Yellow text
+    ctx.fillStyle = "rgba(255, 255, 0, 1)";
+    ctx.fillText(hunterDetectionMessage, messageX, messageY + 8);
+    
+    ctx.restore();
+  }
+
+  // Display survivor hide status message at top center
+  if (localPlayerRole === "survivor" && survivorHideMessage) {
+    ctx.save();
+    ctx.font = "bold 18px Cinzel";
+    ctx.textAlign = "center";
+    const textWidth = ctx.measureText(survivorHideMessage).width;
+    const messageX = viewport.x + viewport.w * 0.5;
+    const messageY = viewport.y + 50;
+    
+    // Blue background for hiding messages
+    const bgColor = survivorHideMessage.includes("HIDDEN") 
+      ? "rgba(30, 100, 150, 0.85)" 
+      : "rgba(100, 100, 150, 0.85)";
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(messageX - textWidth * 0.5 - 14, messageY - 18, textWidth + 28, 32);
+    
+    // Cyan text
+    ctx.fillStyle = "rgba(100, 255, 255, 1)";
+    ctx.fillText(survivorHideMessage, messageX, messageY + 6);
+    
+    ctx.restore();
+  }
 
   ctx.restore();
 }
@@ -2252,6 +2571,36 @@ function frame(now) {
 
   updateHideAnimation(deltaSeconds);
   updateFootsteps(elapsedSeconds);
+  
+  // Update hunter search message timer
+  if (hunterSearchMessageTime > 0 && elapsedSeconds > hunterSearchMessageTime) {
+    hunterSearchMessage = "";
+    hunterSearchMessageTime = 0;
+  }
+
+  // Update hunter detection message timer
+  if (hunterDetectionMessageTime > 0 && elapsedSeconds > hunterDetectionMessageTime) {
+    hunterDetectionMessage = "";
+    hunterDetectionMessageTime = 0;
+  }
+
+  // Update survivor hide message timer
+  if (survivorHideMessageTime > 0 && elapsedSeconds > survivorHideMessageTime) {
+    survivorHideMessage = "";
+    survivorHideMessageTime = 0;
+  }
+  
+  // Update kill animations
+  for (let i = killAnimations.length - 1; i >= 0; i -= 1) {
+    killAnimations[i].progress += deltaSeconds / killAnimations[i].duration;
+    if (killAnimations[i].progress > 1) {
+      killAnimations.splice(i, 1);
+    }
+  }
+  
+  updateProximityWarning();
+  updateHideIndicator();
+  
   if (localPlayerRole === "hunter") {
     moveHunterWithKeys(deltaSeconds);
   } else {
@@ -2330,6 +2679,10 @@ window.addEventListener("keydown", (event) => {
   if (localPlayerRole === "hunter" && (event.code === "Digit0" || event.code === "Numpad0")) {
     tryHunterKill();
   }
+
+  if (localPlayerRole === "hunter" && (event.code === "Digit1" || event.code === "Numpad1")) {
+    tryHunterSearchSpot(performance.now() / 1000);
+  }
 });
 
 window.addEventListener("keyup", (event) => keys.delete(event.code));
@@ -2390,6 +2743,12 @@ if (lobbyBackButton) {
   lobbyBackButton.addEventListener("click", () => {
     setLobbyError("");
     showLobbyStep("step-menu");
+  });
+}
+
+if (hudBackButton) {
+  hudBackButton.addEventListener("click", () => {
+    returnToNameEntry();
   });
 }
 
