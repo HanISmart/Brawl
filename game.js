@@ -26,12 +26,12 @@ const hudTitle = document.getElementById("hud-title");
 const hudRoom = document.getElementById("hud-room");
 const hudControls = document.getElementById("hud-controls");
 const hudBackButton = document.getElementById("hud-back-button");
-const proximityWarning = document.getElementById("proximity-warning");
 const hideIndicator = document.getElementById("hide-indicator");
 
 const HIDE = {
   interactionRange: 110,
   transitionSeconds: 0.28,
+  revealRange: 160,
 };
 
 const FOOTSTEP = {
@@ -75,6 +75,8 @@ const ROOM_CONFIGS = {
 
 let survivorIsHidden = false;
 let survivorHideBlend = 0;
+let survivorHideTarget = 0;
+let survivorHideTransitioning = false;
 let survivorIsDead = false;
 const survivorFootsteps = [];
 let footstepDistanceSinceLast = 0;
@@ -106,13 +108,10 @@ let matchWinner = null;
 let roomStarted = false;
 let roomOwnerId = "";
 
-let hunterSearchMessage = "";
-let hunterSearchMessageTime = 0;
-let hunterDetectionMessage = "";
-let hunterDetectionMessageTime = 0;
 let survivorHideMessage = "";
 let survivorHideMessageTime = 0;
 let killAnimations = []; // Array of { x, y, progress, duration }
+let hunterHitAnimations = []; // Array of { x, y, angle, progress, duration }
 
 const doors = buildDoors(rooms);
 
@@ -406,17 +405,16 @@ function returnToNameEntry() {
   // Reset game state
   survivorIsHidden = false;
   survivorHideBlend = 0;
+  survivorHideTarget = 0;
+  survivorHideTransitioning = false;
   survivorIsDead = false;
   survivorFootsteps.length = 0;
   footstepDistanceSinceLast = 0;
   nextFootIsLeft = true;
-  hunterSearchMessage = "";
-  hunterSearchMessageTime = 0;
-  hunterDetectionMessage = "";
-  hunterDetectionMessageTime = 0;
   survivorHideMessage = "";
   survivorHideMessageTime = 0;
   killAnimations.length = 0;
+  hunterHitAnimations.length = 0;
 
   // Reset room state
   activeRoomCode = "";
@@ -549,7 +547,7 @@ function startGame() {
 
   if (hudControls) {
     hudControls.textContent = localPlayerRole === "hunter"
-      ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range. Press 1 to search nearby hiding spots."
+      ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range."
       : "Survivor controls: WASD move. E open door. F close door. Q hide.";
   }
 
@@ -786,10 +784,7 @@ function toggleHideState() {
     return;
   }
 
-  if (survivorIsHidden) {
-    survivorIsHidden = false;
-    survivorHideMessage = "You are now VISIBLE";
-    survivorHideMessageTime = 2; // 2 seconds
+  if (survivorIsHidden || survivorHideTransitioning) {
     return;
   }
 
@@ -801,18 +796,94 @@ function toggleHideState() {
   player.x = spot.x + spot.w * 0.5;
   player.y = spot.y + spot.h * 0.5;
   survivorIsHidden = true;
+  survivorHideTarget = 1;
+  survivorHideBlend = 0;
+  survivorHideTransitioning = true;
   survivorHideMessage = "You are now HIDDEN";
   survivorHideMessageTime = 2; // 2 seconds
+
+  if (socketReady && gameStarted && localPlayerRole === "survivor") {
+    const nowSeconds = performance.now() / 1000;
+    lastNetworkSendAt = nowSeconds;
+    lastSentState = {
+      x: player.x,
+      y: player.y,
+      hidden: true,
+      dead: false,
+    };
+
+    sendSocketMessage({
+      type: "playerUpdate",
+      x: player.x,
+      y: player.y,
+      hidden: true,
+      dead: false,
+    });
+  }
+}
+
+function revealFromHide(message = "You are now VISIBLE") {
+  if (!survivorIsHidden || survivorIsDead || survivorHideTransitioning) {
+    return;
+  }
+
+  survivorHideTarget = 0;
+  survivorHideTransitioning = true;
+  survivorHideMessage = message;
+  survivorHideMessageTime = 2;
+
+  if (socketReady && gameStarted && localPlayerRole === "survivor") {
+    const nowSeconds = performance.now() / 1000;
+    lastNetworkSendAt = nowSeconds;
+    lastSentState = {
+      x: player.x,
+      y: player.y,
+      hidden: false,
+      dead: false,
+    };
+
+    sendSocketMessage({
+      type: "playerUpdate",
+      x: player.x,
+      y: player.y,
+      hidden: false,
+      dead: false,
+    });
+  }
+}
+
+function maybeAutoRevealWhenHunterNearby() {
+  if (!gameStarted || localPlayerRole !== "survivor" || survivorIsDead || !survivorIsHidden || survivorHideTransitioning) {
+    return;
+  }
+
+  const distanceToHunter = Math.hypot(hunter.x - player.x, hunter.y - player.y);
+  if (distanceToHunter > HIDE.revealRange) {
+    return;
+  }
+
+  revealFromHide("You are appearing");
 }
 
 function updateHideAnimation(deltaSeconds) {
-  const target = survivorIsHidden ? 1 : 0;
   const speed = 1 / HIDE.transitionSeconds;
 
-  if (survivorHideBlend < target) {
-    survivorHideBlend = Math.min(target, survivorHideBlend + deltaSeconds * speed);
-  } else if (survivorHideBlend > target) {
-    survivorHideBlend = Math.max(target, survivorHideBlend - deltaSeconds * speed);
+  if (survivorHideBlend < survivorHideTarget) {
+    survivorHideBlend = Math.min(survivorHideTarget, survivorHideBlend + deltaSeconds * speed);
+  } else if (survivorHideBlend > survivorHideTarget) {
+    survivorHideBlend = Math.max(survivorHideTarget, survivorHideBlend - deltaSeconds * speed);
+  }
+
+  if (survivorHideBlend <= 0.01 && survivorHideTarget === 0) {
+    survivorHideBlend = 0;
+    survivorIsHidden = false;
+    survivorHideTransitioning = false;
+  } else if (survivorHideBlend >= 0.99 && survivorHideTarget === 1) {
+    survivorHideBlend = 1;
+    survivorIsHidden = true;
+    survivorHideTransitioning = false;
+  } else {
+    survivorHideTransitioning = Math.abs(survivorHideBlend - survivorHideTarget) > 0.01;
   }
 }
 
@@ -858,7 +929,17 @@ function moveSurvivor(deltaSeconds) {
     return;
   }
 
-  if (survivorIsHidden || survivorIsDead) {
+  if (survivorIsDead) {
+    return;
+  }
+
+  const wantsMove = keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
+
+  if (survivorIsHidden || survivorHideTransitioning) {
+    if (wantsMove) {
+      revealFromHide();
+    }
+
     return;
   }
 
@@ -906,7 +987,6 @@ function moveSurvivor(deltaSeconds) {
           angle: directionAngle,
           bornAt: performance.now() / 1000,
         });
-
         nextFootIsLeft = !nextFootIsLeft;
       }
     }
@@ -990,6 +1070,15 @@ function tryHunterKill() {
     return false;
   }
 
+  const angle = Math.atan2(rival.y - hunter.y, rival.x - hunter.x);
+  hunterHitAnimations.push({
+    x: hunter.x,
+    y: hunter.y,
+    angle,
+    progress: 0,
+    duration: 0.22,
+  });
+
   const killRange = NET.killRange;
   const distance = Math.hypot(hunter.x - rival.x, hunter.y - rival.y);
   if (distance > killRange) {
@@ -1000,86 +1089,49 @@ function tryHunterKill() {
   return true;
 }
 
-function tryHunterSearchSpot(nowSeconds) {
-  if (localPlayerRole !== "hunter") {
+function drawHunterHitAnimations(cam) {
+  if (hunterHitAnimations.length === 0) {
     return;
   }
 
-  const { spot, distance } = nearestHidingSpotFor(hunter);
-  if (!spot || distance > HIDE.interactionRange) {
-    hunterSearchMessage = "No hiding spot nearby.";
-    hunterSearchMessageTime = nowSeconds + 2;
-    return;
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  for (const anim of hunterHitAnimations) {
+    const progress = Math.min(anim.progress, 1);
+    const ease = 1 - Math.pow(1 - progress, 2);
+    const swing = -0.8 + ease * 1.5;
+    const reach = 34 + ease * 20;
+    const alpha = 1 - progress;
+
+    ctx.save();
+    ctx.translate(anim.x, anim.y);
+    ctx.rotate(anim.angle + swing);
+
+    ctx.strokeStyle = `rgba(255, 215, 130, ${0.2 * alpha})`;
+    ctx.lineWidth = 18;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-10, -4);
+    ctx.lineTo(reach, 0);
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(255, 90, 90, ${0.88 * alpha})`;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(-6, -2);
+    ctx.lineTo(reach, 0);
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.32 * alpha})`;
+    ctx.beginPath();
+    ctx.arc(reach, 0, 5 + progress * 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }
 
-  const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
-  if (!rival || rival.role !== "survivor") {
-    hunterSearchMessage = "No survivor to hunt.";
-    hunterSearchMessageTime = nowSeconds + 2;
-    return;
-  }
-
-  // Check if survivor is hiding in this spot
-  const isInSpot = rival.x >= spot.x && rival.x <= spot.x + spot.w &&
-                   rival.y >= spot.y && rival.y <= spot.y + spot.h;
-
-  if (!isInSpot || !rival.hidden) {
-    hunterSearchMessage = "Nothing is in here.";
-    hunterSearchMessageTime = nowSeconds + 3;
-    return;
-  }
-
-  // Survivor is in the spot! Send kill attempt and trigger animation
-  sendSocketMessage({ type: "attemptKill", targetId: rival.id });
-  
-  // Add kill animation at the spot location
-  killAnimations.push({
-    x: rival.x,
-    y: rival.y,
-    progress: 0,
-    duration: 0.6,
-  });
-
-  // Show detection message
-  hunterDetectionMessage = `SURVIVOR FOUND! ${rival.name} has been caught!`;
-  hunterDetectionMessageTime = nowSeconds + 4;
-}
-
-function updateProximityWarning() {
-  if (!gameStarted) {
-    if (proximityWarning) {
-      proximityWarning.classList.add("is-hidden");
-    }
-    return;
-  }
-
-  const proximityThreshold = 40 * WORLD.unitPerMeter; // 40 meters in game units
-  let isNearby = false;
-  let warningText = "NEARBY";
-
-  if (localPlayerRole === "survivor") {
-    if (!survivorIsDead) {
-      const distance = Math.hypot(hunter.x - player.x, hunter.y - player.y);
-      isNearby = distance < proximityThreshold;
-      warningText = "HUNTER NEAR";
-    }
-  } else if (localPlayerRole === "hunter") {
-    // Check if any survivor is nearby
-    const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
-    if (rival && rival.role === "survivor" && !rival.dead) {
-      const distance = Math.hypot(rival.x - hunter.x, rival.y - hunter.y);
-      isNearby = distance < proximityThreshold;
-      warningText = "SURVIVOR NEAR";
-    }
-  }
-
-  if (proximityWarning) {
-    proximityWarning.classList.toggle("is-hidden", !isNearby);
-    const textElement = proximityWarning.querySelector(".proximity-text");
-    if (textElement) {
-      textElement.textContent = warningText;
-    }
-  }
+  ctx.restore();
 }
 
 function updateHideIndicator() {
@@ -1112,8 +1164,13 @@ function applyNetworkStateToWorld() {
     const wasDead = survivorIsDead;
     survivorIsHidden = Boolean(self.hidden);
     survivorIsDead = Boolean(self.dead);
+    if (survivorIsHidden && !survivorHideTransitioning) {
+      survivorHideBlend = 1;
+    }
     if (!wasDead && survivorIsDead) {
       survivorHideBlend = 0;
+      survivorHideTarget = 0;
+      survivorHideTransitioning = false;
     }
   }
 
@@ -1130,8 +1187,13 @@ function applyNetworkStateToWorld() {
     player.y = primaryRival.y;
     survivorIsHidden = Boolean(primaryRival.hidden);
     survivorIsDead = Boolean(primaryRival.dead);
+    if (survivorIsHidden && !survivorHideTransitioning) {
+      survivorHideBlend = 1;
+    }
     if (survivorIsDead) {
       survivorHideBlend = 0;
+      survivorHideTarget = 0;
+      survivorHideTransitioning = false;
     }
   } else {
     hunter.x = primaryRival.x;
@@ -1240,6 +1302,10 @@ function drawAllNameTags(cam) {
     return;
   }
 
+  if (localPlayerRole === "survivor" && survivorIsHidden) {
+    return;
+  }
+
   ctx.save();
   ctx.translate(-cam.x, -cam.y);
 
@@ -1252,6 +1318,10 @@ function drawAllNameTags(cam) {
   const taggedIds = new Set();
   for (const entry of roomPlayers) {
     if (taggedIds.has(entry.id)) {
+      continue;
+    }
+
+    if (entry.role === "survivor" && entry.hidden) {
       continue;
     }
 
@@ -2475,6 +2545,7 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   drawFootsteps(cam, elapsedSeconds);
   drawDecorationLightSources(cam, elapsedSeconds);
   drawRemotePlayers(cam);
+  drawHunterHitAnimations(cam);
   drawCharacter(hunter, cam, runAnimation.hunter);
   drawCharacter(player, cam, runAnimation.survivor);
   drawKillAnimations(cam);
@@ -2492,43 +2563,6 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   ctx.fillStyle = labelColor;
   ctx.font = "18px Cinzel";
   ctx.fillText(label, viewport.x + 14, viewport.y + 19);
-
-  // Display hunter search message at bottom center
-  if (localPlayerRole === "hunter" && hunterSearchMessage) {
-    ctx.save();
-    ctx.font = "16px Special Elite";
-    ctx.textAlign = "center";
-    const textWidth = ctx.measureText(hunterSearchMessage).width;
-    const messageX = viewport.x + viewport.w * 0.5;
-    const messageY = viewport.y + viewport.h - 40;
-    
-    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-    ctx.fillRect(messageX - textWidth * 0.5 - 12, messageY - 16, textWidth + 24, 28);
-    
-    ctx.fillStyle = "rgba(255, 200, 100, 0.95)";
-    ctx.fillText(hunterSearchMessage, messageX, messageY);
-    ctx.restore();
-  }
-
-  // Display hunter detection message at center (larger and more prominent)
-  if (localPlayerRole === "hunter" && hunterDetectionMessage) {
-    ctx.save();
-    ctx.font = "bold 24px Cinzel";
-    ctx.textAlign = "center";
-    const textWidth = ctx.measureText(hunterDetectionMessage).width;
-    const messageX = viewport.x + viewport.w * 0.5;
-    const messageY = viewport.y + viewport.h * 0.5;
-    
-    // Red background for kill/detection message
-    ctx.fillStyle = "rgba(200, 0, 0, 0.8)";
-    ctx.fillRect(messageX - textWidth * 0.5 - 16, messageY - 20, textWidth + 32, 40);
-    
-    // Yellow text
-    ctx.fillStyle = "rgba(255, 255, 0, 1)";
-    ctx.fillText(hunterDetectionMessage, messageX, messageY + 8);
-    
-    ctx.restore();
-  }
 
   // Display survivor hide status message at top center
   if (localPlayerRole === "survivor" && survivorHideMessage) {
@@ -2571,19 +2605,8 @@ function frame(now) {
 
   updateHideAnimation(deltaSeconds);
   updateFootsteps(elapsedSeconds);
+  maybeAutoRevealWhenHunterNearby();
   
-  // Update hunter search message timer
-  if (hunterSearchMessageTime > 0 && elapsedSeconds > hunterSearchMessageTime) {
-    hunterSearchMessage = "";
-    hunterSearchMessageTime = 0;
-  }
-
-  // Update hunter detection message timer
-  if (hunterDetectionMessageTime > 0 && elapsedSeconds > hunterDetectionMessageTime) {
-    hunterDetectionMessage = "";
-    hunterDetectionMessageTime = 0;
-  }
-
   // Update survivor hide message timer
   if (survivorHideMessageTime > 0 && elapsedSeconds > survivorHideMessageTime) {
     survivorHideMessage = "";
@@ -2597,8 +2620,14 @@ function frame(now) {
       killAnimations.splice(i, 1);
     }
   }
+
+  for (let i = hunterHitAnimations.length - 1; i >= 0; i -= 1) {
+    hunterHitAnimations[i].progress += deltaSeconds / hunterHitAnimations[i].duration;
+    if (hunterHitAnimations[i].progress > 1) {
+      hunterHitAnimations.splice(i, 1);
+    }
+  }
   
-  updateProximityWarning();
   updateHideIndicator();
   
   if (localPlayerRole === "hunter") {
@@ -2676,12 +2705,12 @@ window.addEventListener("keydown", (event) => {
     toggleHideState();
   }
 
-  if (localPlayerRole === "hunter" && (event.code === "Digit0" || event.code === "Numpad0")) {
-    tryHunterKill();
+  if (localPlayerRole === "survivor" && (event.code === "KeyW" || event.code === "KeyA" || event.code === "KeyS" || event.code === "KeyD") && survivorIsHidden) {
+    revealFromHide();
   }
 
-  if (localPlayerRole === "hunter" && (event.code === "Digit1" || event.code === "Numpad1")) {
-    tryHunterSearchSpot(performance.now() / 1000);
+  if (localPlayerRole === "hunter" && (event.code === "Digit0" || event.code === "Numpad0")) {
+    tryHunterKill();
   }
 });
 
