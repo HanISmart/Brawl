@@ -475,9 +475,31 @@ function ensureSocketConnection() {
   return new Promise((resolve, reject) => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const params = new URLSearchParams(window.location.search);
-    const forcedHost = (params.get("server") || "").trim();
-    const host = forcedHost || window.location.host || "localhost:5500";
-    const candidates = [`${protocol}://${host}/ws`, `${protocol}://${host}`];
+    const forced = (params.get("ws") || params.get("server") || "").trim();
+
+    const normalizeCandidates = () => {
+      if (!forced) {
+        const host = window.location.host || "localhost:5500";
+        return [`${protocol}://${host}/ws`, `${protocol}://${host}`];
+      }
+
+      if (/^wss?:\/\//i.test(forced)) {
+        const base = forced.replace(/\/$/, "");
+        return [base, `${base}/ws`];
+      }
+
+      if (/^https?:\/\//i.test(forced)) {
+        const parsed = new URL(forced);
+        const wsProto = parsed.protocol === "https:" ? "wss:" : "ws:";
+        const origin = `${wsProto}//${parsed.host}`;
+        return [`${origin}/ws`, origin];
+      }
+
+      const host = forced;
+      return [`${protocol}://${host}/ws`, `${protocol}://${host}`];
+    };
+
+    const candidates = normalizeCandidates();
 
     if (socket && socket.readyState === WebSocket.CONNECTING) {
       socket.close();
