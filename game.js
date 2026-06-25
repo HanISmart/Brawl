@@ -1070,6 +1070,12 @@ function tryHunterKill() {
     return false;
   }
 
+  const killRange = NET.killRange;
+  const distance = Math.hypot(hunter.x - rival.x, hunter.y - rival.y);
+  if (distance > killRange) {
+    return false;
+  }
+
   const angle = Math.atan2(rival.y - hunter.y, rival.x - hunter.x);
   hunterHitAnimations.push({
     x: hunter.x,
@@ -1078,12 +1084,6 @@ function tryHunterKill() {
     progress: 0,
     duration: 0.22,
   });
-
-  const killRange = NET.killRange;
-  const distance = Math.hypot(hunter.x - rival.x, hunter.y - rival.y);
-  if (distance > killRange) {
-    return false;
-  }
 
   sendSocketMessage({ type: "attemptKill", targetId: rival.id });
   return true;
