@@ -89,6 +89,7 @@ let survivorHideBlend = 0;
 let survivorHideTarget = 0;
 let survivorHideTransitioning = false;
 let survivorIsDead = false;
+let survivorIsEscaped = false;
 const survivorFootsteps = [];
 let footstepDistanceSinceLast = 0;
 let nextFootIsLeft = true;
@@ -119,6 +120,10 @@ let matchWinner = null;
 let roomStarted = false;
 let roomOwnerId = "";
 let matchTimeRemaining = MATCH_TIMER.durationSeconds;
+let frontDoorOpen = false;
+let frontDoorOpenProgress = 0;
+let survivorEscapedCount = 0;
+let survivorEscapesNeeded = 1;
 
 let survivorHideMessage = "";
 let survivorHideMessageTime = 0;
@@ -126,6 +131,32 @@ let killAnimations = []; // Array of { x, y, progress, duration }
 let hunterHitAnimations = []; // Array of { x, y, angle, progress, duration }
 
 const doors = buildDoors(rooms);
+const frontDoor = buildFrontDoor();
+
+function buildFrontDoor() {
+  const foyer = rooms.find((room) => room.name === "Foyer") || rooms[0];
+  const width = Math.min(340, foyer.w * 0.52);
+  const depth = 92;
+  const x = foyer.x + foyer.w * 0.5 - width * 0.5;
+  const y = foyer.y - (depth - DOOR.wallGap) * 0.5;
+
+  return {
+    orientation: "horizontal",
+    x,
+    y,
+    w: width,
+    h: depth,
+    isOpen: false,
+    openProgress: 0,
+    hingeSide: 1,
+    escapeZone: {
+      x: x - 28,
+      y: foyer.y - 150,
+      w: width + 56,
+      h: 145,
+    },
+  };
+}
 
 function rectsOverlap(a, b, padding = 0) {
   return a.x < b.x + b.w + padding
@@ -149,22 +180,23 @@ function findRoomForDecoration(decoration) {
   return null;
 }
 
-function keepWindowsOffDoors() {
+function keepWallItemsOffDoors() {
   const step = 8;
   const wallInset = 8;
   const overlapPadding = 6;
+  const blockedDoors = [...doors, frontDoor];
+  const wallItems = [
+    ...roomDecorations.filter((item) => item.style === "window"),
+    ...hidingSpots.filter((item) => item.style === "curtain"),
+  ];
 
-  for (const decoration of roomDecorations) {
-    if (decoration.style !== "window") {
-      continue;
-    }
-
+  for (const decoration of wallItems) {
     const room = findRoomForDecoration(decoration);
     if (!room) {
       continue;
     }
 
-    const overlapsDoor = () => doors.some((door) => rectsOverlap(decoration, door, overlapPadding));
+    const overlapsDoor = () => blockedDoors.some((door) => rectsOverlap(decoration, door, overlapPadding));
     if (!overlapsDoor()) {
       continue;
     }
@@ -217,7 +249,7 @@ function keepWindowsOffDoors() {
   }
 }
 
-keepWindowsOffDoors();
+keepWallItemsOffDoors();
 
 function sanitizePlayerName(rawName) {
   const cleaned = rawName.trim().slice(0, 24);
@@ -300,9 +332,17 @@ function maybeStartWhenRoomReady() {
 
 function applyRoomSnapshot(room) {
   roomPlayers = Array.isArray(room?.players) ? room.players : [];
-  matchWinner = room?.winner === "hunter" ? "hunter" : null;
+  matchWinner = room?.winner === "hunter"
+    ? "hunter"
+    : (room?.winner === "survivor" ? "survivor" : null);
   roomStarted = Boolean(room?.started);
   roomOwnerId = String(room?.ownerId || "");
+  frontDoorOpen = Boolean(room?.frontDoorOpen);
+  if (Number.isFinite(room?.timerRemaining)) {
+    matchTimeRemaining = Math.max(0, Number(room.timerRemaining));
+  }
+  survivorEscapedCount = Number(room?.survivorEscapedCount || 0);
+  survivorEscapesNeeded = Math.max(1, Number(room?.survivorEscapesNeeded || 1));
 
   if (room?.code) {
     activeRoomCode = room.code;
@@ -343,6 +383,7 @@ function applyInitialSpawnFromRoom() {
   if (localPlayerRole === "survivor") {
     survivorIsHidden = Boolean(self.hidden);
     survivorIsDead = Boolean(self.dead);
+    survivorIsEscaped = Boolean(self.escaped);
     if (survivorIsDead) {
       survivorHideBlend = 0;
     }
@@ -512,6 +553,7 @@ function returnToNameEntry() {
   survivorHideTarget = 0;
   survivorHideTransitioning = false;
   survivorIsDead = false;
+  survivorIsEscaped = false;
   survivorFootsteps.length = 0;
   footstepDistanceSinceLast = 0;
   nextFootIsLeft = true;
@@ -528,6 +570,10 @@ function returnToNameEntry() {
   roomOwnerId = "";
   hasAppliedInitialSpawn = false;
   matchTimeRemaining = MATCH_TIMER.durationSeconds;
+  frontDoorOpen = false;
+  frontDoorOpenProgress = 0;
+  survivorEscapedCount = 0;
+  survivorEscapesNeeded = 1;
 
   // Reset player positions
   player.x = 540;
@@ -653,7 +699,7 @@ function startGame() {
   if (hudControls) {
     hudControls.textContent = localPlayerRole === "hunter"
       ? "Hunter controls: Arrow Keys move. Press 0 to kill when in range."
-      : "Survivor controls: WASD move. E open door. F close door. Q hide.";
+      : "Survivor controls: WASD move. E open door. F close door. Q hide. Front door unlocks at 0:00.";
   }
 
   if (hud) {
@@ -664,7 +710,17 @@ function startGame() {
     startScreen.classList.add("is-hidden");
   }
 
-  matchTimeRemaining = MATCH_TIMER.durationSeconds;
+  if (socketReady && roomStarted) {
+    matchTimeRemaining = Math.max(0, matchTimeRemaining);
+    frontDoorOpen = frontDoorOpen || matchTimeRemaining <= 0;
+    survivorEscapesNeeded = Math.max(1, survivorEscapesNeeded);
+  } else {
+    matchTimeRemaining = MATCH_TIMER.durationSeconds;
+    frontDoorOpen = false;
+    survivorEscapedCount = 0;
+    survivorEscapesNeeded = 1;
+  }
+  frontDoorOpenProgress = frontDoorOpen ? 1 : 0;
   lastTime = performance.now();
   gameStarted = true;
 }
@@ -792,6 +848,14 @@ function pointInsideOpenDoorWithRadius(x, y, radius, door) {
   return x >= door.x + radius && x <= door.x + door.w - radius && y >= door.y - radius && y <= door.y + door.h + radius;
 }
 
+function pointInsideFrontDoorEscapeZoneWithRadius(x, y, radius) {
+  const zone = frontDoor.escapeZone;
+  return x >= zone.x + radius
+    && x <= zone.x + zone.w - radius
+    && y >= zone.y + radius
+    && y <= zone.y + zone.h - radius;
+}
+
 function canOccupy(entity, x, y) {
   const minX = entity.radius + 4;
   const minY = entity.radius + 4;
@@ -810,6 +874,16 @@ function canOccupy(entity, x, y) {
 
   for (const door of doors) {
     if (door.isOpen && pointInsideOpenDoorWithRadius(x, y, entity.radius, door)) {
+      return true;
+    }
+  }
+
+  if (entity === player && localPlayerRole === "survivor" && frontDoorOpen) {
+    if (pointInsideOpenDoorWithRadius(x, y, entity.radius, frontDoor)) {
+      return true;
+    }
+
+    if (pointInsideFrontDoorEscapeZoneWithRadius(x, y, entity.radius)) {
       return true;
     }
   }
@@ -908,6 +982,34 @@ function updateDoorAnimations(deltaSeconds) {
     } else if (door.openProgress > target) {
       door.openProgress = Math.max(target, door.openProgress - deltaSeconds * speed);
     }
+  }
+
+  frontDoor.isOpen = frontDoorOpen;
+  const frontSpeed = 1 / DOOR_ANIMATION.transitionSeconds;
+  const frontTarget = frontDoorOpen ? 1 : 0;
+  if (frontDoorOpenProgress < frontTarget) {
+    frontDoorOpenProgress = Math.min(frontTarget, frontDoorOpenProgress + deltaSeconds * frontSpeed);
+  } else if (frontDoorOpenProgress > frontTarget) {
+    frontDoorOpenProgress = Math.max(frontTarget, frontDoorOpenProgress - deltaSeconds * frontSpeed);
+  }
+  frontDoor.openProgress = frontDoorOpenProgress;
+}
+
+function maybeEscapeFromFrontDoor() {
+  if (localPlayerRole !== "survivor" || survivorIsDead || survivorIsEscaped || !frontDoorOpen) {
+    return;
+  }
+
+  if (!pointInsideFrontDoorEscapeZoneWithRadius(player.x, player.y, player.radius)) {
+    return;
+  }
+
+  if (!socketReady) {
+    survivorIsEscaped = true;
+    const needEscapes = 1;
+    survivorEscapedCount = Math.max(survivorEscapedCount, 1);
+    survivorEscapesNeeded = needEscapes;
+    matchWinner = survivorEscapedCount >= survivorEscapesNeeded ? "survivor" : "hunter";
   }
 }
 
@@ -1065,6 +1167,10 @@ function moveSurvivor(deltaSeconds) {
     return;
   }
 
+  if (survivorIsEscaped) {
+    return;
+  }
+
   const wantsMove = keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
 
   if (survivorIsHidden || survivorHideTransitioning) {
@@ -1123,6 +1229,8 @@ function moveSurvivor(deltaSeconds) {
       }
     }
   }
+
+  maybeEscapeFromFrontDoor();
 }
 
 function updateFootsteps(nowSeconds) {
@@ -1198,7 +1306,7 @@ function moveHunterWithKeys(deltaSeconds) {
 
 function tryHunterKill() {
   const rival = roomPlayers.find((entry) => entry.id === primaryRivalId);
-  if (!rival || rival.role !== "survivor" || rival.dead) {
+  if (!rival || rival.role !== "survivor" || rival.dead || rival.escaped) {
     return false;
   }
 
@@ -1267,7 +1375,7 @@ function drawHunterHitAnimations(cam) {
 }
 
 function updateHideIndicator() {
-  if (!gameStarted || localPlayerRole !== "survivor" || survivorIsDead || survivorIsHidden) {
+  if (!gameStarted || localPlayerRole !== "survivor" || survivorIsDead || survivorIsHidden || survivorIsEscaped) {
     if (hideIndicator) {
       hideIndicator.classList.add("is-hidden");
     }
@@ -1296,6 +1404,7 @@ function applyNetworkStateToWorld() {
     const wasDead = survivorIsDead;
     survivorIsHidden = Boolean(self.hidden);
     survivorIsDead = Boolean(self.dead);
+    survivorIsEscaped = Boolean(self.escaped);
     if (survivorIsHidden && !survivorHideTransitioning) {
       survivorHideBlend = 1;
     }
@@ -1319,6 +1428,7 @@ function applyNetworkStateToWorld() {
     player.y = primaryRival.y;
     survivorIsHidden = Boolean(primaryRival.hidden);
     survivorIsDead = Boolean(primaryRival.dead);
+    survivorIsEscaped = Boolean(primaryRival.escaped);
     if (survivorIsHidden && !survivorHideTransitioning) {
       survivorHideBlend = 1;
     }
@@ -1352,13 +1462,15 @@ function syncLocalPlayerToRoom(elapsedSeconds) {
     y: localEntity.y,
     hidden: localPlayerRole === "survivor" ? survivorIsHidden : false,
     dead: localPlayerRole === "survivor" ? survivorIsDead : false,
+    escaped: localPlayerRole === "survivor" ? survivorIsEscaped : false,
   };
 
   if (lastSentState) {
     const movedDistance = Math.hypot(nextState.x - lastSentState.x, nextState.y - lastSentState.y);
     const changed = movedDistance >= NET.minMoveDelta
       || nextState.hidden !== lastSentState.hidden
-      || nextState.dead !== lastSentState.dead;
+      || nextState.dead !== lastSentState.dead
+      || nextState.escaped !== lastSentState.escaped;
 
     if (!changed) {
       return;
@@ -1374,6 +1486,7 @@ function syncLocalPlayerToRoom(elapsedSeconds) {
     y: nextState.y,
     hidden: nextState.hidden,
     dead: nextState.dead,
+    escaped: nextState.escaped,
   });
 }
 
@@ -1387,6 +1500,10 @@ function drawRemotePlayers(cam) {
   ctx.translate(-cam.x, -cam.y);
 
   for (const remote of remotePlayers) {
+    if (remote.role === "survivor" && remote.escaped) {
+      continue;
+    }
+
     if (remote.id === primaryRivalId) {
       continue;
     }
@@ -1401,6 +1518,7 @@ function drawRemotePlayers(cam) {
       role: remote.role,
       hideBlend: remote.role === "survivor" && remote.hidden ? 1 : 0,
       isDead: remote.role === "survivor" && remote.dead,
+      isEscaped: remote.role === "survivor" && remote.escaped,
     });
   }
 
@@ -1457,6 +1575,10 @@ function drawAllNameTags(cam) {
       continue;
     }
 
+    if (entry.role === "survivor" && entry.escaped) {
+      continue;
+    }
+
     taggedIds.add(entry.id);
 
     let x = entry.x;
@@ -1497,22 +1619,29 @@ function drawWorldGrid(cam, viewport) {
   ctx.translate(-cam.x, -cam.y);
 
   const backdrop = ctx.createLinearGradient(0, 0, 0, WORLD.height);
-  backdrop.addColorStop(0, "#11161d");
-  backdrop.addColorStop(0.45, "#0b0f15");
-  backdrop.addColorStop(1, "#080a0d");
+  backdrop.addColorStop(0, "#0d1118");
+  backdrop.addColorStop(0.46, "#080b11");
+  backdrop.addColorStop(1, "#05070b");
   ctx.fillStyle = backdrop;
   ctx.fillRect(0, 0, WORLD.width, WORLD.height);
 
   const glow = ctx.createRadialGradient(WORLD.width * 0.28, WORLD.height * 0.24, 0, WORLD.width * 0.28, WORLD.height * 0.24, WORLD.width * 0.92);
-  glow.addColorStop(0, "rgba(99, 112, 132, 0.08)");
-  glow.addColorStop(0.35, "rgba(99, 112, 132, 0.03)");
-  glow.addColorStop(1, "rgba(99, 112, 132, 0)");
+  glow.addColorStop(0, "rgba(72, 88, 112, 0.06)");
+  glow.addColorStop(0.35, "rgba(72, 88, 112, 0.02)");
+  glow.addColorStop(1, "rgba(72, 88, 112, 0)");
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, WORLD.width, WORLD.height);
 
+  const bloodMist = ctx.createRadialGradient(WORLD.width * 0.62, WORLD.height * 0.72, 0, WORLD.width * 0.62, WORLD.height * 0.72, WORLD.width * 0.96);
+  bloodMist.addColorStop(0, "rgba(86, 12, 14, 0.11)");
+  bloodMist.addColorStop(0.5, "rgba(55, 8, 10, 0.05)");
+  bloodMist.addColorStop(1, "rgba(40, 5, 7, 0)");
+  ctx.fillStyle = bloodMist;
+  ctx.fillRect(0, 0, WORLD.width, WORLD.height);
+
   const floorSheen = ctx.createRadialGradient(WORLD.width * 0.45, WORLD.height * 0.38, 0, WORLD.width * 0.45, WORLD.height * 0.38, WORLD.width * 0.92);
-  floorSheen.addColorStop(0, "rgba(255, 255, 255, 0.025)");
-  floorSheen.addColorStop(0.5, "rgba(255, 255, 255, 0.012)");
+  floorSheen.addColorStop(0, "rgba(255, 255, 255, 0.018)");
+  floorSheen.addColorStop(0.5, "rgba(255, 255, 255, 0.008)");
   floorSheen.addColorStop(1, "rgba(255, 255, 255, 0)");
   ctx.fillStyle = floorSheen;
   ctx.fillRect(0, 0, WORLD.width, WORLD.height);
@@ -1524,7 +1653,7 @@ function drawWorldGrid(cam, viewport) {
     ctx.fillRect(x, y, 2, 2);
   }
 
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.016)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.009)";
   ctx.lineWidth = 1;
   for (let y = 0; y <= WORLD.height; y += 120) {
     ctx.beginPath();
@@ -1533,12 +1662,21 @@ function drawWorldGrid(cam, viewport) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = "rgba(0, 0, 0, 0.08)";
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.14)";
   for (let x = 0; x <= WORLD.width; x += 220) {
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x + WORLD.height * 0.08, WORLD.height);
     ctx.stroke();
+  }
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+  for (let i = 0; i < 12; i += 1) {
+    const sx = (i * 421) % WORLD.width;
+    const sy = (i * 263) % WORLD.height;
+    const sw = 180 + (i % 4) * 70;
+    const sh = 40 + (i % 3) * 22;
+    ctx.fillRect(sx, sy, sw, sh);
   }
 
   ctx.restore();
@@ -1813,6 +1951,34 @@ function drawRooms(cam) {
       drawRoomWalls(room);
     }, "rgba(0, 0, 0, 0.24)", 5, 8, 8);
   }
+
+  const frontOpen = Number.isFinite(frontDoorOpenProgress) ? frontDoorOpenProgress : (frontDoorOpen ? 1 : 0);
+  const frontEased = 1 - Math.pow(1 - frontOpen, 2);
+  const frontVisualY = frontDoor.y + (frontDoor.h - WALL_THICKNESS) * 0.5;
+
+  drawWithDepth(() => {
+    drawMaterialRect(frontDoor.x, frontVisualY, frontDoor.w, WALL_THICKNESS, { top: "#121922", mid: "#0f151d", bottom: "#0a0f16" }, { border: "rgba(255, 236, 206, 0.3)", borderWidth: 1.6, gloss: "rgba(255,255,255,0.05)" });
+
+    const panelH = 44;
+    const closedY = frontVisualY - panelH + 1;
+    const openedY = frontVisualY - panelH - 36;
+    const panelY = closedY + (openedY - closedY) * frontEased;
+    drawMaterialRect(frontDoor.x + 3, panelY, frontDoor.w - 6, panelH, { top: "#6f1a1a", mid: "#9b1f1f", bottom: "#4b1212" }, { border: "rgba(255, 221, 184, 0.55)", borderWidth: 2, gloss: "rgba(255,255,255,0.12)" });
+
+    if (!frontDoorOpen) {
+      const lockW = 110;
+      const lockH = 9;
+      const lockX = frontDoor.x + frontDoor.w * 0.5 - lockW * 0.5;
+      const lockY = panelY + panelH * 0.5 - lockH * 0.5;
+      drawMaterialRect(lockX, lockY, lockW, lockH, { top: "#4f5a6a", mid: "#7c8b9f", bottom: "#394251" }, { border: "rgba(229, 236, 246, 0.55)", borderWidth: 1.4, gloss: "rgba(255,255,255,0.18)" });
+    } else {
+      const glow = ctx.createRadialGradient(frontDoor.x + frontDoor.w * 0.5, frontVisualY + 1, 0, frontDoor.x + frontDoor.w * 0.5, frontVisualY + 1, frontDoor.w * 0.65);
+      glow.addColorStop(0, "rgba(140, 232, 168, 0.24)");
+      glow.addColorStop(1, "rgba(140, 232, 168, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(frontDoor.x - 30, frontVisualY - 40, frontDoor.w + 60, 80);
+    }
+  }, "rgba(0, 0, 0, 0.34)", 4, 5, 6);
 
   for (const door of doors) {
     const openProgress = Number.isFinite(door.openProgress) ? door.openProgress : (door.isOpen ? 1 : 0);
@@ -2209,11 +2375,16 @@ function drawCharacter(entity, cam, runState, appearance = {}) {
   const isSurvivor = role === "survivor";
   const hideBlend = isSurvivor ? (appearance.hideBlend ?? survivorHideBlend) : 0;
   const isDead = isSurvivor ? (appearance.isDead ?? survivorIsDead) : false;
+  const isEscaped = isSurvivor ? (appearance.isEscaped ?? survivorIsEscaped) : false;
   const runPhase = runState?.phase || 0;
   const runBlend = runState?.blend || 0;
   const facingSign = isSurvivor ? runState?.facingSign || 1 : 1;
 
   if (isSurvivor && hideBlend >= 0.995) {
+    return;
+  }
+
+  if (isSurvivor && isEscaped) {
     return;
   }
 
@@ -2553,22 +2724,31 @@ function drawCharacter(entity, cam, runState, appearance = {}) {
 
 function drawFog(elapsedSeconds) {
   ctx.save();
-  const particles = 22;
+  const particles = 34;
   for (let i = 0; i < particles; i += 1) {
-    const t = elapsedSeconds * 0.07 + i * 0.39;
+    const t = elapsedSeconds * 0.085 + i * 0.39;
     const x = (Math.sin(t * 1.23) * 0.5 + 0.5) * screen.width;
     const y = (Math.cos(t * 0.9) * 0.5 + 0.5) * screen.height;
-    const r = 70 + ((i * 43) % 160);
+    const r = 90 + ((i * 43) % 210);
 
     const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, "rgba(194, 209, 226, 0.04)");
-    g.addColorStop(1, "rgba(194, 209, 226, 0)");
+    g.addColorStop(0, "rgba(176, 192, 212, 0.05)");
+    g.addColorStop(0.6, "rgba(134, 68, 75, 0.026)");
+    g.addColorStop(1, "rgba(90, 32, 36, 0)");
 
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  const lowDrift = ctx.createLinearGradient(0, 0, 0, screen.height);
+  lowDrift.addColorStop(0, "rgba(12, 16, 24, 0.04)");
+  lowDrift.addColorStop(0.6, "rgba(16, 10, 14, 0.10)");
+  lowDrift.addColorStop(1, "rgba(26, 8, 10, 0.16)");
+  ctx.fillStyle = lowDrift;
+  ctx.fillRect(0, 0, screen.width, screen.height);
+
   ctx.restore();
 }
 
@@ -2629,8 +2809,9 @@ function drawKillAnimations(cam) {
 
 function drawVignette(viewport) {
   const gradient = ctx.createRadialGradient(viewport.x + viewport.w / 2, viewport.y + viewport.h / 2, Math.min(viewport.w, viewport.h) * 0.2, viewport.x + viewport.w / 2, viewport.y + viewport.h / 2, Math.max(viewport.w, viewport.h) * 0.7);
-  gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
-  gradient.addColorStop(1, "rgba(0, 0, 0, 0.78)");
+  gradient.addColorStop(0, "rgba(0, 0, 0, 0.06)");
+  gradient.addColorStop(0.62, "rgba(0, 0, 0, 0.42)");
+  gradient.addColorStop(1, "rgba(0, 0, 0, 0.88)");
 
   ctx.fillStyle = gradient;
   ctx.fillRect(viewport.x, viewport.y, viewport.w, viewport.h);
@@ -2712,6 +2893,8 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   drawKillAnimations(cam);
   drawAllNameTags(cam);
   drawFog(elapsedSeconds);
+  const dreadPulse = 0.16 + Math.sin(elapsedSeconds * 0.85) * 0.04;
+  drawThreatOverlay({ x: 0, y: 0, w: viewport.w, h: viewport.h }, clamp(proximityIntensity * 0.5 + dreadPulse, 0, 0.75));
   drawVignette({ x: 0, y: 0, w: viewport.w, h: viewport.h });
   if (focusEntity !== hunter) {
     drawCornerProximityGlow({ x: 0, y: 0, w: viewport.w, h: viewport.h }, proximityIntensity, "198, 44, 44");
@@ -2760,13 +2943,19 @@ function formatMatchTime(seconds) {
 
 function drawMatchTimer() {
   const label = `Time ${formatMatchTime(matchTimeRemaining)}`;
+  const status = frontDoorOpen ? "Front Door: OPEN" : "Front Door: LOCKED";
+  const escapesLabel = `Escaped ${survivorEscapedCount}/${survivorEscapesNeeded}`;
 
   ctx.save();
   ctx.font = "700 24px Cinzel";
   ctx.textAlign = "right";
-  const textWidth = ctx.measureText(label).width;
-  const panelW = textWidth + 24;
-  const panelH = 38;
+  const textWidth = Math.max(
+    ctx.measureText(label).width,
+    ctx.measureText(status).width,
+    ctx.measureText(escapesLabel).width
+  );
+  const panelW = textWidth + 28;
+  const panelH = 66;
   const panelX = screen.width - panelW - 18;
   const panelY = screen.height - panelH - 18;
 
@@ -2779,7 +2968,14 @@ function drawMatchTimer() {
 
   const danger = matchTimeRemaining <= 10;
   ctx.fillStyle = danger ? "rgba(255, 138, 138, 0.96)" : "rgba(240, 228, 212, 0.96)";
-  ctx.fillText(label, screen.width - 30, panelY + 26);
+  ctx.fillText(label, screen.width - 30, panelY + 24);
+
+  ctx.font = "700 14px Special Elite";
+  ctx.fillStyle = frontDoorOpen ? "rgba(160, 246, 184, 0.95)" : "rgba(255, 206, 150, 0.95)";
+  ctx.fillText(status, screen.width - 30, panelY + 42);
+
+  ctx.fillStyle = "rgba(216, 226, 236, 0.92)";
+  ctx.fillText(escapesLabel, screen.width - 30, panelY + 58);
   ctx.restore();
 }
 
@@ -2798,6 +2994,10 @@ function frame(now) {
 
   if (matchTimeRemaining > 0 && !matchWinner) {
     matchTimeRemaining = Math.max(0, matchTimeRemaining - deltaSeconds);
+  }
+
+  if (!frontDoorOpen && matchTimeRemaining <= 0) {
+    frontDoorOpen = true;
   }
 
   updateDoorAnimations(deltaSeconds);
@@ -2871,6 +3071,16 @@ function frame(now) {
     ctx.font = "700 40px Cinzel";
     ctx.textAlign = "center";
     ctx.fillText("HUNTERS WIN", screen.width * 0.5, screen.height * 0.32 + 54);
+    ctx.textAlign = "start";
+  }
+
+  if (matchWinner === "survivor") {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
+    ctx.fillRect(0, screen.height * 0.32, screen.width, 84);
+    ctx.fillStyle = "rgba(174, 245, 194, 0.96)";
+    ctx.font = "700 40px Cinzel";
+    ctx.textAlign = "center";
+    ctx.fillText("SURVIVORS ESCAPED", screen.width * 0.5, screen.height * 0.32 + 54);
     ctx.textAlign = "start";
   }
 

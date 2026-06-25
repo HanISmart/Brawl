@@ -12,6 +12,14 @@ const ROOM_CONFIGS = {
   h1s4: { label: "1 Hunter / 4 Survivor", hunters: 1, survivors: 4 },
 };
 
+const MATCH_DURATION_SECONDS = 60;
+const FRONT_DOOR_ESCAPE_ZONE = {
+  x: 410,
+  y: 20,
+  w: 320,
+  h: 120,
+};
+
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -95,19 +103,86 @@ function roomIsFull(room) {
   return hunters === room.config.hunters && survivors === room.config.survivors;
 }
 
+function getRoomRemainingSeconds(room) {
+  if (!room.started || !room.startedAt) {
+    return MATCH_DURATION_SECONDS;
+  }
+
+  const elapsedSeconds = (Date.now() - room.startedAt) / 1000;
+  return Math.max(0, MATCH_DURATION_SECONDS - elapsedSeconds);
+}
+
+function isFrontDoorOpen(room) {
+  return getRoomRemainingSeconds(room) <= 0;
+}
+
+function isInsideFrontDoorEscapeZone(player) {
+  return player.x >= FRONT_DOOR_ESCAPE_ZONE.x
+    && player.x <= FRONT_DOOR_ESCAPE_ZONE.x + FRONT_DOOR_ESCAPE_ZONE.w
+    && player.y >= FRONT_DOOR_ESCAPE_ZONE.y
+    && player.y <= FRONT_DOOR_ESCAPE_ZONE.y + FRONT_DOOR_ESCAPE_ZONE.h;
+}
+
+function requiredEscapesForWin(survivorCount) {
+  return Math.ceil(survivorCount / 2);
+}
+
+function evaluateRoomWinner(room) {
+  if (room.winner) {
+    return;
+  }
+
+  const survivors = Array.from(room.players.values()).filter((player) => player.role === "survivor");
+  if (survivors.length === 0) {
+    return;
+  }
+
+  const escapedCount = survivors.filter((player) => player.escaped).length;
+  const deadCount = survivors.filter((player) => player.dead).length;
+  const aliveNotEscapedCount = survivors.filter((player) => !player.dead && !player.escaped).length;
+  const neededEscapes = requiredEscapesForWin(survivors.length);
+
+  if (escapedCount >= neededEscapes) {
+    room.winner = "survivor";
+    return;
+  }
+
+  if (aliveNotEscapedCount + escapedCount < neededEscapes) {
+    room.winner = "hunter";
+    return;
+  }
+
+  const allResolved = survivors.every((player) => player.dead || player.escaped);
+  if (allResolved) {
+    room.winner = escapedCount >= neededEscapes ? "survivor" : "hunter";
+  }
+}
+
+function startRoomMatch(room) {
+  if (room.started) {
+    return;
+  }
+
+  room.started = true;
+  room.startedAt = Date.now();
+}
+
 function maybeAutoStartRoom(room) {
   if (room.started || room.winner) {
     return;
   }
 
   if (roomIsFull(room)) {
-    room.started = true;
+    startRoomMatch(room);
   }
 }
 
 function roomSnapshot(room) {
   const survivors = Array.from(room.players.values()).filter((player) => player.role === "survivor");
-  const aliveSurvivors = survivors.filter((player) => !player.dead);
+  const aliveSurvivors = survivors.filter((player) => !player.dead && !player.escaped);
+  const escapedSurvivors = survivors.filter((player) => player.escaped);
+  const timerRemaining = getRoomRemainingSeconds(room);
+  const neededEscapes = requiredEscapesForWin(survivors.length);
 
   return {
     code: room.code,
@@ -119,8 +194,12 @@ function roomSnapshot(room) {
     hunterCount: roleCount(room.players, "hunter"),
     survivorCount: roleCount(room.players, "survivor"),
     winner: room.winner || null,
+    timerRemaining,
+    frontDoorOpen: isFrontDoorOpen(room),
     survivorAliveCount: aliveSurvivors.length,
     survivorTotalCount: survivors.length,
+    survivorEscapedCount: escapedSurvivors.length,
+    survivorEscapesNeeded: neededEscapes,
     players: Array.from(room.players.values()).map((player) => ({
       id: player.id,
       name: player.name,
@@ -129,11 +208,13 @@ function roomSnapshot(room) {
       y: player.y,
       hidden: player.hidden,
       dead: player.dead,
+      escaped: Boolean(player.escaped),
     })),
   };
 }
 
 function broadcastRoomState(room) {
+  evaluateRoomWinner(room);
   const payload = { type: "roomState", room: roomSnapshot(room) };
 
   for (const player of room.players.values()) {
@@ -196,6 +277,7 @@ function addPlayerToRoom(clientInfo, room, role, name) {
     y: spawn.y,
     hidden: false,
     dead: false,
+    escaped: false,
   };
 
   room.players.set(player.id, player);
@@ -223,6 +305,7 @@ function handleCreateRoom(clientInfo, message) {
     ownerId: clientInfo.playerId,
     players: new Map(),
     started: false,
+    startedAt: null,
     winner: null,
   };
 
@@ -298,13 +381,26 @@ function handlePlayerUpdate(clientInfo, message) {
   }
 
   if (player.role === "survivor") {
+    if (player.escaped) {
+      player.hidden = false;
+      player.dead = false;
+      broadcastRoomState(room);
+      return;
+    }
+
     player.hidden = Boolean(message.hidden);
     player.dead = Boolean(message.dead);
+
+    if (!player.dead && isFrontDoorOpen(room) && isInsideFrontDoorEscapeZone(player)) {
+      player.escaped = true;
+      player.hidden = false;
+    }
   } else {
     player.hidden = false;
     player.dead = false;
   }
 
+  evaluateRoomWinner(room);
   broadcastRoomState(room);
 }
 
@@ -329,7 +425,7 @@ function handleAttemptKill(clientInfo, message) {
 
   const targetId = String(message.targetId || "");
   const target = room.players.get(targetId);
-  if (!target || target.role !== "survivor" || target.dead) {
+  if (!target || target.role !== "survivor" || target.dead || target.escaped) {
     return;
   }
 
@@ -341,12 +437,9 @@ function handleAttemptKill(clientInfo, message) {
 
   target.dead = true;
   target.hidden = false;
+  target.escaped = false;
 
-  const survivors = Array.from(room.players.values()).filter((player) => player.role === "survivor");
-  const allSurvivorsDead = survivors.length > 0 && survivors.every((player) => player.dead);
-  if (allSurvivorsDead) {
-    room.winner = "hunter";
-  }
+  evaluateRoomWinner(room);
 
   broadcastRoomState(room);
 }
@@ -372,7 +465,7 @@ function handleStartMatch(clientInfo) {
     return;
   }
 
-  room.started = true;
+  startRoomMatch(room);
   broadcastRoomState(room);
 }
 
