@@ -436,41 +436,90 @@ function ensureSocketConnection() {
     return Promise.resolve();
   }
 
-  return new Promise((resolve, reject) => {
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(`${protocol}://${window.location.host}`);
+  const connectToUrl = (url) => new Promise((resolve, reject) => {
+    const candidate = new WebSocket(url);
+    let settled = false;
 
-    const failTimer = window.setTimeout(() => {
+    const timeout = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      candidate.close();
       reject(new Error("Could not connect to game server."));
-    }, 8000);
+    }, 4500);
 
-    socket.addEventListener("open", () => {
-      socketReady = true;
-      window.clearTimeout(failTimer);
-      resolve();
+    candidate.addEventListener("open", () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve(candidate);
     }, { once: true });
 
-    socket.addEventListener("error", () => {
-      socketReady = false;
-      window.clearTimeout(failTimer);
+    candidate.addEventListener("error", () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeout);
+      candidate.close();
       reject(new Error("WebSocket connection error."));
     }, { once: true });
+  });
 
-    socket.addEventListener("close", () => {
+  return new Promise((resolve, reject) => {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const params = new URLSearchParams(window.location.search);
+    const forcedHost = (params.get("server") || "").trim();
+    const host = forcedHost || window.location.host || "localhost:5500";
+    const candidates = [`${protocol}://${host}/ws`, `${protocol}://${host}`];
+
+    if (socket && socket.readyState === WebSocket.CONNECTING) {
+      socket.close();
+    }
+
+    const tryConnect = async () => {
+      let lastError = null;
+
+      for (const url of candidates) {
+        try {
+          const connected = await connectToUrl(url);
+          socket = connected;
+          socketReady = true;
+
+          socket.addEventListener("close", () => {
+            socketReady = false;
+            if (gameStarted && hudRoom) {
+              hudRoom.textContent = `Room ${activeRoomCode || "-"} | Disconnected`;
+            }
+          });
+
+          socket.addEventListener("message", (event) => {
+            try {
+              const parsed = JSON.parse(event.data);
+              handleSocketMessage(parsed);
+            } catch {
+              setLobbyError("Received invalid server data.");
+            }
+          });
+
+          resolve();
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
       socketReady = false;
-      if (gameStarted && hudRoom) {
-        hudRoom.textContent = `Room ${activeRoomCode || "-"} | Disconnected`;
-      }
-    });
+      reject(lastError || new Error("Could not connect to game server."));
+    };
 
-    socket.addEventListener("message", (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        handleSocketMessage(parsed);
-      } catch {
-        setLobbyError("Received invalid server data.");
-      }
-    });
+    tryConnect();
   });
 }
 

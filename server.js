@@ -541,7 +541,26 @@ const server = http.createServer((req, res) => {
   serveStaticFile(req.url || "/", res);
 });
 
-const wsServer = new WebSocketServer({ server });
+const wsServer = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  let pathname = "/";
+
+  try {
+    pathname = new URL(req.url || "/", "http://localhost").pathname;
+  } catch {
+    pathname = "/";
+  }
+
+  if (pathname !== "/" && pathname !== "/ws") {
+    socket.destroy();
+    return;
+  }
+
+  wsServer.handleUpgrade(req, socket, head, (ws) => {
+    wsServer.emit("connection", ws, req);
+  });
+});
 
 wsServer.on("connection", (ws) => {
   const clientInfo = {
