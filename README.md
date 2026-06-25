@@ -11,10 +11,28 @@ This first step sets up the background scene:
 
 ## Run
 
-Open `index.html` in a browser, or run a simple local server:
+Use the built-in Node server (required for multiplayer WebSocket support):
 
 ```bash
-python3 -m http.server 5500
+npm install
+npm start
 ```
 
-Then visit `http://localhost:5500`.
+Then open one of the printed URLs, for example:
+
+```text
+http://localhost:5500
+http://<your-lan-ip>:5500
+```
+
+For other computers on the same network, open:
+
+```text
+http://<host-lan-ip>:5500
+```
+
+If needed, force a specific WebSocket host from the browser URL:
+
+```text
+http://<host-lan-ip>:5500/?server=<host-lan-ip>:5500
+```

@@ -1,9 +1,10 @@
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { WebSocketServer } = require("ws");
 
-const HOST = "0.0.0.0";
+const HOST = String(process.env.HOST || "").trim();
 const PORT = Number(process.env.PORT || 5500);
 
 const ROOM_CONFIGS = {
@@ -35,6 +36,32 @@ const MIME_TYPES = {
 
 const clients = new Map();
 const rooms = new Map();
+
+function collectReachableUrls(port) {
+  const urls = new Set([`http://localhost:${port}`]);
+  const interfaces = os.networkInterfaces();
+
+  for (const entries of Object.values(interfaces)) {
+    if (!entries) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry || entry.internal) {
+        continue;
+      }
+
+      if (entry.family === "IPv4") {
+        urls.add(`http://${entry.address}:${port}`);
+      } else if (entry.family === "IPv6") {
+        const normalized = entry.address.split("%")[0];
+        urls.add(`http://[${normalized}]:${port}`);
+      }
+    }
+  }
+
+  return Array.from(urls);
+}
 
 function send(ws, data) {
   if (ws.readyState === ws.OPEN) {
@@ -587,6 +614,21 @@ wsServer.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Brawl server running at http://${HOST}:${PORT}`);
-});
+const onServerReady = () => {
+  const bindTarget = HOST || "all interfaces (IPv4 + IPv6 where available)";
+  console.log(`Brawl server listening on ${bindTarget}, port ${PORT}`);
+
+  const urls = collectReachableUrls(PORT);
+  if (urls.length > 0) {
+    console.log("Reachable URLs:");
+    for (const url of urls) {
+      console.log(`- ${url}`);
+    }
+  }
+};
+
+if (HOST) {
+  server.listen(PORT, HOST, onServerReady);
+} else {
+  server.listen(PORT, onServerReady);
+}

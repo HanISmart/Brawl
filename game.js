@@ -538,7 +538,8 @@ function ensureSocketConnection() {
       }
 
       socketReady = false;
-      reject(lastError || new Error("Could not connect to game server."));
+      const defaultMessage = "Could not connect to game server. Open the game from the host machine URL and run npm start there. You can also pass ?server=HOST:PORT in the URL.";
+      reject(lastError || new Error(defaultMessage));
     };
 
     tryConnect();
