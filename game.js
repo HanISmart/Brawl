@@ -34,6 +34,11 @@ const HIDE = {
   revealRange: 160,
 };
 
+const DOOR_ANIMATION = {
+  transitionSeconds: 0.2,
+  openClearance: 0.9,
+};
+
 const FOOTSTEP = {
   lifetime: 3,
   spacing: 34,
@@ -47,6 +52,8 @@ const LIGHT = {
   shadowLength: 34,
   ambient: 0.2,
 };
+
+const WALL_THICKNESS = 4;
 
 const RUN = {
   minDistance: 0.35,
@@ -71,6 +78,10 @@ const ROOM_CONFIGS = {
   h3s6: { label: "3 Hunter / 6 Survivor", hunters: 3, survivors: 6 },
   h2s5: { label: "2 Hunter / 5 Survivor", hunters: 2, survivors: 5 },
   h1s4: { label: "1 Hunter / 4 Survivor", hunters: 1, survivors: 4 },
+};
+
+const MATCH_TIMER = {
+  durationSeconds: 60,
 };
 
 let survivorIsHidden = false;
@@ -107,6 +118,7 @@ let hasAppliedInitialSpawn = false;
 let matchWinner = null;
 let roomStarted = false;
 let roomOwnerId = "";
+let matchTimeRemaining = MATCH_TIMER.durationSeconds;
 
 let survivorHideMessage = "";
 let survivorHideMessageTime = 0;
@@ -114,6 +126,98 @@ let killAnimations = []; // Array of { x, y, progress, duration }
 let hunterHitAnimations = []; // Array of { x, y, angle, progress, duration }
 
 const doors = buildDoors(rooms);
+
+function rectsOverlap(a, b, padding = 0) {
+  return a.x < b.x + b.w + padding
+    && a.x + a.w > b.x - padding
+    && a.y < b.y + b.h + padding
+    && a.y + a.h > b.y - padding;
+}
+
+function findRoomForDecoration(decoration) {
+  for (const room of rooms) {
+    if (
+      decoration.x >= room.x
+      && decoration.y >= room.y
+      && decoration.x + decoration.w <= room.x + room.w
+      && decoration.y + decoration.h <= room.y + room.h
+    ) {
+      return room;
+    }
+  }
+
+  return null;
+}
+
+function keepWindowsOffDoors() {
+  const step = 8;
+  const wallInset = 8;
+  const overlapPadding = 6;
+
+  for (const decoration of roomDecorations) {
+    if (decoration.style !== "window") {
+      continue;
+    }
+
+    const room = findRoomForDecoration(decoration);
+    if (!room) {
+      continue;
+    }
+
+    const overlapsDoor = () => doors.some((door) => rectsOverlap(decoration, door, overlapPadding));
+    if (!overlapsDoor()) {
+      continue;
+    }
+
+    const distanceToTop = Math.abs(decoration.y - room.y);
+    const distanceToBottom = Math.abs((decoration.y + decoration.h) - (room.y + room.h));
+    const distanceToLeft = Math.abs(decoration.x - room.x);
+    const distanceToRight = Math.abs((decoration.x + decoration.w) - (room.x + room.w));
+    const wallDistance = Math.min(distanceToTop, distanceToBottom, distanceToLeft, distanceToRight);
+    const onHorizontalWall = wallDistance === distanceToTop || wallDistance === distanceToBottom;
+
+    const originalX = decoration.x;
+    const originalY = decoration.y;
+
+    if (onHorizontalWall) {
+      const minX = room.x + wallInset;
+      const maxX = room.x + room.w - decoration.w - wallInset;
+
+      for (let offset = step; offset <= room.w; offset += step) {
+        const candidates = [originalX - offset, originalX + offset];
+        for (const candidate of candidates) {
+          decoration.x = clamp(candidate, minX, maxX);
+          if (!overlapsDoor()) {
+            break;
+          }
+        }
+
+        if (!overlapsDoor()) {
+          break;
+        }
+      }
+    } else {
+      const minY = room.y + wallInset;
+      const maxY = room.y + room.h - decoration.h - wallInset;
+
+      for (let offset = step; offset <= room.h; offset += step) {
+        const candidates = [originalY - offset, originalY + offset];
+        for (const candidate of candidates) {
+          decoration.y = clamp(candidate, minY, maxY);
+          if (!overlapsDoor()) {
+            break;
+          }
+        }
+
+        if (!overlapsDoor()) {
+          break;
+        }
+      }
+    }
+  }
+}
+
+keepWindowsOffDoors();
 
 function sanitizePlayerName(rawName) {
   const cleaned = rawName.trim().slice(0, 24);
@@ -423,6 +527,7 @@ function returnToNameEntry() {
   primaryRivalId = "";
   roomOwnerId = "";
   hasAppliedInitialSpawn = false;
+  matchTimeRemaining = MATCH_TIMER.durationSeconds;
 
   // Reset player positions
   player.x = 540;
@@ -559,6 +664,7 @@ function startGame() {
     startScreen.classList.add("is-hidden");
   }
 
+  matchTimeRemaining = MATCH_TIMER.durationSeconds;
   lastTime = performance.now();
   gameStarted = true;
 }
@@ -633,6 +739,8 @@ function buildDoors(roomList) {
             w: DOOR.verticalDepth,
             h: DOOR.verticalHeight,
             isOpen: true,
+            openProgress: 1,
+            hingeSide: (i + j) % 2 === 0 ? 1 : -1,
           });
         }
       }
@@ -656,6 +764,8 @@ function buildDoors(roomList) {
             w: DOOR.horizontalWidth,
             h: DOOR.horizontalDepth,
             isOpen: true,
+            openProgress: 1,
+            hingeSide: (i + j) % 2 === 0 ? 1 : -1,
           });
         }
       }
@@ -670,6 +780,11 @@ function pointInsideRectWithRadius(x, y, radius, rect) {
 }
 
 function pointInsideOpenDoorWithRadius(x, y, radius, door) {
+  const openProgress = Number.isFinite(door.openProgress) ? door.openProgress : (door.isOpen ? 1 : 0);
+  if (openProgress < DOOR_ANIMATION.openClearance) {
+    return false;
+  }
+
   if (door.orientation === "vertical") {
     return x >= door.x - radius && x <= door.x + door.w + radius && y >= door.y + radius && y <= door.y + door.h - radius;
   }
@@ -776,6 +891,23 @@ function autoOpenDoorFor(entity, range = 90) {
   const { door, distance } = nearestDoorFor(entity);
   if (door && !door.isOpen && distance <= range) {
     door.isOpen = true;
+  }
+}
+
+function updateDoorAnimations(deltaSeconds) {
+  const speed = 1 / DOOR_ANIMATION.transitionSeconds;
+
+  for (const door of doors) {
+    if (!Number.isFinite(door.openProgress)) {
+      door.openProgress = door.isOpen ? 1 : 0;
+    }
+
+    const target = door.isOpen ? 1 : 0;
+    if (door.openProgress < target) {
+      door.openProgress = Math.min(target, door.openProgress + deltaSeconds * speed);
+    } else if (door.openProgress > target) {
+      door.openProgress = Math.max(target, door.openProgress - deltaSeconds * speed);
+    }
   }
 }
 
@@ -1577,7 +1709,7 @@ function drawWallSegment3D(startX, startY, width, height, orientation, room) {
 }
 
 function drawRoomWalls(room) {
-  const wallThickness = 4;
+  const wallThickness = WALL_THICKNESS;
   const wallFaceY = room.y - 1;
   const wallFaceX = room.x - 1;
   const horizontalGaps = { top: [], bottom: [] };
@@ -1683,17 +1815,46 @@ function drawRooms(cam) {
   }
 
   for (const door of doors) {
-    if (door.isOpen) {
-      drawWithDepth(() => {
-        drawMaterialRect(door.x, door.y, door.w, door.h, { top: "rgba(46, 92, 57, 0.35)", mid: "rgba(44, 147, 71, 0.34)", bottom: "rgba(22, 52, 31, 0.38)" }, { border: "rgba(149, 236, 161, 0.75)", borderWidth: 2, gloss: "rgba(255,255,255,0.10)" });
-      }, "rgba(0, 0, 0, 0.22)", 3, 4, 5);
-    } else {
-      drawWithDepth(() => {
-        drawMaterialRect(door.x, door.y, door.w, door.h, { top: "#7d1f1f", mid: "#b02222", bottom: "#431010" }, { border: "rgba(255, 228, 181, 0.45)", borderWidth: 2, gloss: "rgba(255,255,255,0.12)" });
-        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
-        ctx.fillRect(door.x + 6, door.y + 5, door.w - 12, 4);
-      }, "rgba(0, 0, 0, 0.30)", 4, 5, 5);
-    }
+    const openProgress = Number.isFinite(door.openProgress) ? door.openProgress : (door.isOpen ? 1 : 0);
+    const easedOpen = 1 - Math.pow(1 - openProgress, 2);
+    const visualX = door.orientation === "vertical"
+      ? door.x + (door.w - WALL_THICKNESS) * 0.5
+      : door.x;
+    const visualY = door.orientation === "horizontal"
+      ? door.y + (door.h - WALL_THICKNESS) * 0.5
+      : door.y;
+    const visualW = door.orientation === "vertical" ? WALL_THICKNESS : door.w;
+    const visualH = door.orientation === "horizontal" ? WALL_THICKNESS : door.h;
+
+    drawWithDepth(() => {
+      drawMaterialRect(visualX, visualY, visualW, visualH, { top: "#1f262f", mid: "#1a212a", bottom: "#11161e" }, { border: "rgba(255, 235, 205, 0.24)", borderWidth: 1.4, gloss: "rgba(255,255,255,0.05)" });
+
+      if (easedOpen > 0.02) {
+        const passageAlpha = 0.24 + easedOpen * 0.22;
+        drawMaterialRect(visualX + 1, visualY + 1, Math.max(0, visualW - 2), Math.max(0, visualH - 2), {
+          top: `rgba(44, 84, 56, ${passageAlpha})`,
+          mid: `rgba(34, 118, 66, ${passageAlpha})`,
+          bottom: `rgba(18, 44, 30, ${passageAlpha})`,
+        }, { border: "rgba(149, 236, 161, 0.68)", borderWidth: 1.6, gloss: "rgba(255,255,255,0.10)" });
+      }
+
+      const panelFactor = 1 - easedOpen * 0.88;
+      if (panelFactor > 0.08) {
+        if (door.orientation === "vertical") {
+          const panelW = Math.max(1, visualW * panelFactor);
+          const panelX = door.hingeSide > 0 ? visualX : visualX + (visualW - panelW);
+          drawMaterialRect(panelX, visualY, panelW, visualH, { top: "#7d1f1f", mid: "#b02222", bottom: "#431010" }, { border: "rgba(255, 228, 181, 0.45)", borderWidth: 2, gloss: "rgba(255,255,255,0.12)" });
+          ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+          ctx.fillRect(panelX + 1, visualY + 1, Math.max(0, panelW - 2), 1);
+        } else {
+          const panelH = Math.max(1, visualH * panelFactor);
+          const panelY = door.hingeSide > 0 ? visualY : visualY + (visualH - panelH);
+          drawMaterialRect(visualX, panelY, visualW, panelH, { top: "#7d1f1f", mid: "#b02222", bottom: "#431010" }, { border: "rgba(255, 228, 181, 0.45)", borderWidth: 2, gloss: "rgba(255,255,255,0.12)" });
+          ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+          ctx.fillRect(visualX + 1, panelY + 1, Math.max(0, visualW - 2), 1);
+        }
+      }
+    }, "rgba(0, 0, 0, 0.30)", 4, 5, 5);
   }
 
   ctx.restore();
@@ -2590,6 +2751,38 @@ function renderViewport(viewport, focusEntity, label, labelColor, elapsedSeconds
   ctx.restore();
 }
 
+function formatMatchTime(seconds) {
+  const total = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+function drawMatchTimer() {
+  const label = `Time ${formatMatchTime(matchTimeRemaining)}`;
+
+  ctx.save();
+  ctx.font = "700 24px Cinzel";
+  ctx.textAlign = "right";
+  const textWidth = ctx.measureText(label).width;
+  const panelW = textWidth + 24;
+  const panelH = 38;
+  const panelX = screen.width - panelW - 18;
+  const panelY = screen.height - panelH - 18;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.56)";
+  ctx.fillRect(panelX, panelY, panelW, panelH);
+
+  ctx.strokeStyle = "rgba(255, 236, 206, 0.42)";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(panelX + 0.5, panelY + 0.5, panelW - 1, panelH - 1);
+
+  const danger = matchTimeRemaining <= 10;
+  ctx.fillStyle = danger ? "rgba(255, 138, 138, 0.96)" : "rgba(240, 228, 212, 0.96)";
+  ctx.fillText(label, screen.width - 30, panelY + 26);
+  ctx.restore();
+}
+
 function frame(now) {
   const deltaSeconds = Math.min((now - lastTime) / 1000, 0.05);
   const elapsedSeconds = now / 1000;
@@ -2603,6 +2796,11 @@ function frame(now) {
 
   applyNetworkStateToWorld();
 
+  if (matchTimeRemaining > 0 && !matchWinner) {
+    matchTimeRemaining = Math.max(0, matchTimeRemaining - deltaSeconds);
+  }
+
+  updateDoorAnimations(deltaSeconds);
   updateHideAnimation(deltaSeconds);
   updateFootsteps(elapsedSeconds);
   maybeAutoRevealWhenHunterNearby();
@@ -2650,6 +2848,7 @@ function frame(now) {
 
   ctx.clearRect(0, 0, screen.width, screen.height);
   renderViewport(viewport, focusEntity, viewportLabel, labelColor, elapsedSeconds);
+  drawMatchTimer();
 
   ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
   ctx.fillRect(0, 0, screen.width, 1);
